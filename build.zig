@@ -23,8 +23,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-	exe.addAnonymousModule("network", .{ .source_file = .{ .path = "libs/zig-network/network.zig" } });
-	exe.addAnonymousModule("async", .{ .source_file = .{ .path = "libs/zig-async/src/main.zig" } });
+    //exe.addAnonymousModule("network", .{ .source_file = .{ .path = "libs/zig-network/network.zig" } });
+    //exe.addAnonymousModule("async", .{ .source_file = .{ .path = "libs/zig-async/src/main.zig" } });
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
