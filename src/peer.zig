@@ -1,7 +1,6 @@
 const std = @import("std");
 const Torrent = @import("torrent.zig");
 const network = @import("network.zig");
-const RndGen = std.rand.DefaultPrng;
 
 const Self = @This();
 
@@ -13,12 +12,13 @@ const PeerState = packed struct {
 const TBitfield = std.packed_int_array.PackedIntSliceEndian(u1, std.builtin.Endian.Big);
 
 allocator: std.mem.Allocator,
-torrent: *const Torrent,
+torrent: *Torrent,
 sock: network.Socket,
 handshake: bool,
 bitfielded: bool,
+id: ?[]u8,
 pieceByteCount: []u32,
-bitfield: TBitfield,
+//bitfield: TBitfield,
 remoteBitfield: TBitfield,
 remoteState: PeerState, //instructions sent to remote
 localState: PeerState, //instructions sent to self
@@ -27,12 +27,11 @@ scratch: []u8,
 //ringBuffer: RingBuffer,
 
 //temp
-file: std.fs.File,
 //recvFile: std.fs.File,
-count: u32 = 0,
 waitingForBlock: bool = false,
+requestingPiece: ?u32 = null,
 
-pub fn init(allocator: std.mem.Allocator, endpoint: network.EndPoint, bind_port: u16, torrent: *const Torrent) !Self {
+pub fn init(allocator: std.mem.Allocator, endpoint: network.EndPoint, bind_port: u16, torrent: *Torrent) !Self {
     var self: Self = undefined;
 
     self.allocator = allocator;
@@ -49,36 +48,18 @@ pub fn init(allocator: std.mem.Allocator, endpoint: network.EndPoint, bind_port:
     self.handshake = false;
     self.bitfielded = false;
 
-    self.pieceByteCount = try allocator.alloc(u32, torrent.info.pieces.len);
+    self.pieceByteCount = try allocator.alloc(u32, torrent.file.info.pieces.len);
     for (0..self.pieceByteCount.len) |i| {
         self.pieceByteCount[i] = 0;
     }
-    var bitfieldBytes = try allocator.alloc(u8, try std.math.divCeil(usize, torrent.info.pieces.len, 8));
-    @memset(bitfieldBytes, 0);
-    self.bitfield = TBitfield.init(bitfieldBytes, torrent.info.pieces.len);
-    for (0..torrent.info.pieces.len) |i| {
-        self.bitfield.set(i, 0);
-    }
 
-    var remoteBitfieldBytes = try allocator.alloc(u8, try std.math.divCeil(usize, torrent.info.pieces.len, 8));
+    var byteCount = TBitfield.bytesRequired(self.torrent.file.info.pieces.len);
+    var remoteBitfieldBytes = try allocator.alloc(u8, byteCount);
     @memset(remoteBitfieldBytes, 0);
-    self.remoteBitfield = TBitfield.init(remoteBitfieldBytes, torrent.info.pieces.len);
+    self.remoteBitfield = TBitfield.init(remoteBitfieldBytes, torrent.file.info.pieces.len);
 
     self.localState = .{ .Unchoked = false, .Interested = false };
     self.remoteState = .{ .Unchoked = false, .Interested = false };
-
-    var rnd = RndGen.init(0);
-    var fileid: u16 = rnd.random().int(u16);
-
-    var filename = try std.fmt.allocPrint(allocator, "torrent-{}.bin", .{fileid});
-
-    self.file = try std.fs.cwd().createFile(
-        filename,
-        .{ .read = false },
-    );
-
-    allocator.free(filename);
-
     // self.recvFile = try std.fs.cwd().createFile(
     // 	"recv.bin",
     // 	.{ .read = false },
@@ -89,8 +70,8 @@ pub fn init(allocator: std.mem.Allocator, endpoint: network.EndPoint, bind_port:
     var sendBuf = std.mem.zeroes([49 + protocol.len]u8);
     sendBuf[0] = protocol.len;
     std.mem.copyForwards(u8, sendBuf[1..], protocol);
-    std.mem.copyForwards(u8, sendBuf[(1 + 8 + protocol.len)..], &torrent.infoHash);
-    std.mem.copyForwards(u8, sendBuf[(1 + 8 + protocol.len + 20)..], &torrent.infoHash);
+    std.mem.copyForwards(u8, sendBuf[(1 + 8 + protocol.len)..], &torrent.file.infoHash);
+    std.mem.copyForwards(u8, sendBuf[(1 + 8 + protocol.len + 20)..], &torrent.file.infoHash);
     _ = try self.sock.send(&sendBuf);
 
     //var scratch = std.mem.zeroes([49+255]u8);
@@ -104,17 +85,19 @@ pub fn init(allocator: std.mem.Allocator, endpoint: network.EndPoint, bind_port:
 
     //self.ringBuffer.init();
 
-    self.count = 0;
+    self.requestingPiece = null;
+
+    self.id = null;
 
     return self;
 }
 
 pub fn deinit(self: *@This()) void {
-    //self.pieceBitset.deinit();
-	self.allocator.free(self.bitfield.bytes);
-	self.bitfield = undefined;
-	self.allocator.free(self.remoteBitfield.bytes);
-	self.remoteBitfield = undefined;
+    if (self.id) |id| self.allocator.free(id);
+    self.allocator.free(self.pieceByteCount);
+    self.allocator.free(self.remoteBitfield.bytes);
+    self.allocator.free(self.scratch);
+    self.remoteBitfield = undefined;
     self.sock.close();
 }
 
@@ -126,71 +109,79 @@ pub fn parsePacket(self: *@This(), data: []const u8) !usize {
         var protocolName = data[1..][0..protocolNameLen];
         if (!std.mem.eql(u8, protocolName, "BitTorrent protocol")) return error.OperationNotSupported;
         var infoHash = data[(1 + protocolNameLen + 8)..][0..20];
-        if (!std.mem.eql(u8, infoHash, &self.torrent.infoHash)) return error.OperationNotSupported;
+        if (!std.mem.eql(u8, infoHash, &self.torrent.file.infoHash)) return error.OperationNotSupported;
+
         var peerId = data[(1 + protocolNameLen + 8 + 20)..][0..20];
-        std.debug.print("Protocol Name: {s}\n", .{protocolName});
-        std.debug.print("Info Hash: {any}\n", .{infoHash});
-        std.debug.print("Peer ID: {any}\n", .{peerId});
+        self.id = try std.Uri.escapeString(self.allocator, peerId);
+
         self.handshake = true;
         return 49 + protocolNameLen;
     }
     var size: u32 = std.mem.readIntBig(u32, data[0..4]);
     if (size == 0) {
-        std.debug.print("keep alive!\n", .{});
+        std.debug.print("[{?s}] keep alive!\n", .{self.id});
         _ = try self.sock.send("\x00\x00\x00\x00");
         return 4;
     }
-    switch (data[4]) {
+
+	//std.debug.print("[{?s}] packet: {any}\n", .{self.id, data[0..size+4]});
+
+    size -= 1;
+    var op = data[4];
+    var args = data[5..];
+    switch (op) {
         0 => { //choke
-            std.debug.print("choke\n", .{});
+            std.debug.print("[{?s}] choke\n", .{self.id});
             self.localState.Unchoked = false;
         },
         1 => { //unchoke
-            std.debug.print("unchoke\n", .{});
+            std.debug.print("[{?s}] unchoke\n", .{self.id});
             self.localState.Unchoked = true;
         },
         2 => { //interested
-            std.debug.print("interested\n", .{});
+            std.debug.print("[{?s}] interested\n", .{self.id});
             self.localState.Interested = true;
         },
         3 => { //not interested
-            std.debug.print("not interested\n", .{});
+            std.debug.print("[{?s}] not interested\n", .{self.id});
             self.localState.Interested = false;
         },
         4 => { //have
-            std.debug.print("have\n", .{});
-            var pieceIdx = std.mem.readIntBig(u32, data[5..][0..4]);
-            self.remoteBitfield.bytes[pieceIdx] = 1;
+            std.debug.print("[{?s}] have\n", .{self.id});
+            var pieceIdx = std.mem.readIntBig(u32, args[0..4]);
+            self.remoteBitfield.set(pieceIdx, 1);
         },
         5 => { //bitfield
             if (self.bitfielded) return error.BitfieldAlreadyRecvd;
             self.bitfielded = true;
-            std.debug.print("bitfield\n", .{});
-            //std.debug.print("Packet: {any}\n", .{data});
-            std.mem.copyForwards(u8, self.remoteBitfield.bytes, data[5..size]);
+            std.debug.print("[{?s}] bitfield ({d})({any})\n", .{ self.id, args[0..size].len, args[0..size] });
+            std.mem.copyForwards(u8, self.remoteBitfield.bytes, args[0..size]);
         },
         6 => { //request
-            std.debug.print("request\n", .{});
+            std.debug.print("[{?s}] request\n", .{self.id});
         },
         7 => { //piece
-            var pieceIdx = std.mem.readIntBig(u32, data[5..9]);
-            var beginOffset = std.mem.readIntBig(u32, data[9..13]);
-            std.debug.print("piece ({}, {}, {})\n", .{ pieceIdx, beginOffset, size });
-            self.pieceByteCount[pieceIdx] = beginOffset + size - 9;
-            if (self.pieceByteCount[pieceIdx] == self.torrent.info.pieceLength) {
-                self.bitfield.set(pieceIdx, 1);
+            var pieceIdx = std.mem.readIntBig(u32, args[0..4]);
+            var beginOffset = std.mem.readIntBig(u32, args[4..8]);
+            std.debug.print("[{?s}] piece ({}, {}, {})\n", .{ self.id, pieceIdx, beginOffset, size-8 });
+            self.pieceByteCount[pieceIdx] = beginOffset + size - 8;
+            if (self.pieceByteCount[pieceIdx] >= self.torrent.file.info.pieceLength) {
+                self.torrent.bitfield.set(pieceIdx, 1);
                 try self.Have(pieceIdx);
+                self.requestingPiece = null;
             }
             self.waitingForBlock = false;
-            try self.file.pwriteAll(data[13..], beginOffset + pieceIdx * self.torrent.info.pieceLength);
-            try self.file.sync();
+            var fileOffset = beginOffset + pieceIdx * self.torrent.file.info.pieceLength;
+            var writeData = args[8..size];
+            try self.torrent.outfile.pwriteAll(writeData, fileOffset);
+            //try self.torrent.writelist.write(self.allocator, fileOffset, fileOffset + writeData.len);
         },
         8 => { //cancel
-            std.debug.print("cancel\n", .{});
+            std.debug.print("[{?s}] cancel\n", .{self.id});
         },
         else => return error.InvalidPacketID,
     }
-    return size + 4;
+    return size + 5;
 }
 
 pub fn Choke(self: *@This()) !void {
@@ -238,9 +229,10 @@ pub fn Bitfield(self: *@This()) !void {
 
 pub fn GetBlock(self: *@This(), piece: u32, offset: u32) !void {
     std.debug.print("Send Get Block ({d}, {d}) ", .{ piece, offset });
-    var pieceLen = self.torrent.info.pieceLength;
+    var pieceLen = self.torrent.file.info.pieceLength;
     var length: u32 = 1 << 14;
     if (offset + length > pieceLen) {
+		std.debug.print("{} {} {}\n", .{offset, length, pieceLen});
         length = pieceLen - offset;
     }
     std.debug.print("[Length: {d}]\n", .{length});
@@ -251,27 +243,30 @@ pub fn GetBlock(self: *@This(), piece: u32, offset: u32) !void {
     std.mem.writeIntBig(u32, data[13..][0..4], length);
     _ = try self.sock.send(&data);
     self.waitingForBlock = true;
+    self.torrent.requestBitfield.set(piece, 1);
+    self.requestingPiece = piece;
 }
 
 pub fn GetNextBlock(self: *@This()) !void {
-    var pieces = try AndNot(self.allocator, self.remoteBitfield, self.bitfield);
-    var piece: u32 = 0;
-    var offset: u32 = 0;
-    for (self.pieceByteCount, 0..) |bytes, i| {
-        if (pieces.get(i) == 0) continue;
-        var pieceLen = self.torrent.info.pieceLength;
-        if (i == self.torrent.info.pieces.len - 1) {
-            pieceLen = @intCast(self.torrent.info.length - self.torrent.info.pieceLength * (self.torrent.info.pieces.len - 1));
+    var piece: u32 = blk: {
+        if (self.requestingPiece) |i| break :blk i;
+        for (self.pieceByteCount, 0..) |bytes, i| {
+            if (self.torrent.bitfield.get(i) == 1) continue;
+            if (self.remoteBitfield.get(i) == 0) continue;
+            if (self.torrent.requestBitfield.get(i) == 1) continue;
+            var pieceLen = self.torrent.file.info.pieceLength;
+            if (i == self.torrent.file.info.pieces.len - 1) {
+                pieceLen = @intCast(self.torrent.file.info.length - self.torrent.file.info.pieceLength * (self.torrent.file.info.pieces.len - 1));
+            }
+            if (bytes < pieceLen) {
+                break :blk @intCast(@as(u64, i));
+            }
+        } else {
+            return error.NoPieceLeft;
         }
-        if (bytes < pieceLen) {
-            piece = @intCast(@as(u64, i));
-            offset = bytes;
-            break;
-        }
-    } else {
-        return error.NoPieceLeft;
-    }
-    try self.GetBlock(piece, offset);
+        break :blk 0;
+    };
+    try self.GetBlock(piece, self.pieceByteCount[piece]);
 }
 
 pub fn GetBlockCount(self: *@This()) usize {
@@ -280,15 +275,6 @@ pub fn GetBlockCount(self: *@This()) usize {
         count += self.remoteBitfield.get(i);
     }
     return count;
-}
-
-pub fn AndNot(alloctor: std.mem.Allocator, left: TBitfield, right: TBitfield) !TBitfield {
-    var resultBytes = try alloctor.alloc(u8, left.bytes.len);
-    var result = TBitfield.init(resultBytes, left.len);
-    for (0..result.len) |i| {
-        result.set(i, @intFromBool((left.get(i) == 1) and !(right.get(i) == 1)));
-    }
-    return result;
 }
 
 pub fn recieve(self: *@This()) !void {
@@ -304,6 +290,9 @@ pub fn recieve(self: *@This()) !void {
 }
 
 fn validPacket(self: *@This(), bytes: []const u8) bool {
+	var temp: usize = bytes.len;
+	_ = temp;
+	//std.debug.print("{d}\n", .{bytes[0..temp]});
     if (self.handshake == false) {
         if (bytes.len < 1) return false;
         var protocolNameLen = bytes[0];

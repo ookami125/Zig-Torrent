@@ -86,11 +86,11 @@ pub fn getPeers(self: *@This(), torrent: *Torrent) !void {
     try switch (self.connection_type) {
         .UDP => {
             var sendPacket: [82]u8 = undefined;
-            var infoHash: [20]u8 = torrent.infoHash; //.{0xC9, 0xE1, 0x57, 0x63, 0xF7, 0x22, 0xF2, 0x3E, 0x98, 0xA2, 0x9D, 0xEC, 0xDF, 0xAE, 0x34, 0x1B, 0x98, 0xD5, 0x30, 0x56};
+            var infoHash: [20]u8 = torrent.file.infoHash; //.{0xC9, 0xE1, 0x57, 0x63, 0xF7, 0x22, 0xF2, 0x3E, 0x98, 0xA2, 0x9D, 0xEC, 0xDF, 0xAE, 0x34, 0x1B, 0x98, 0xD5, 0x30, 0x56};
             std.mem.copy(u8, sendPacket[0..], &infoHash);
             std.mem.copy(u8, sendPacket[20..], &self.peer_id); //client ID
             writeInt(u64, &sendPacket, 40, 0); //downloaded
-            writeInt(u64, &sendPacket, 48, torrent.info.length); //left
+            writeInt(u64, &sendPacket, 48, torrent.file.info.length); //left
             writeInt(u64, &sendPacket, 56, 0); //uploaded
             writeInt(u32, &sendPacket, 64, 2); //event
             writeInt(u32, &sendPacket, 68, 0); //ip address
@@ -127,7 +127,7 @@ pub fn getPeers(self: *@This(), torrent: *Torrent) !void {
             var client = std.http.Client{ .allocator = self.allocator };
             defer client.deinit(); // handled below
 
-            var info_hash = try std.Uri.escapeStringWithFn(self.allocator, &torrent.infoHash, retFalse);
+            var info_hash = try std.Uri.escapeStringWithFn(self.allocator, &torrent.file.infoHash, retFalse);
             defer self.allocator.free(info_hash);
 
             var peer_id = try std.Uri.escapeStringWithFn(self.allocator, &self.peer_id, retFalse);
@@ -177,7 +177,29 @@ pub fn getPeers(self: *@This(), torrent: *Torrent) !void {
                 std.debug.print("{s}: {s}\n", .{ entry.key, entry.value });
             }
 
-            std.debug.print("Body: {s}\n", .{body});
+            var dictIter = try bencode.GetDict(body, null);
+            while (dictIter.next()) |temp| {
+                std.debug.print("{s}\n", .{temp.key});
+                if (std.mem.eql(u8, temp.key, "peers")) {
+                    var peerString = try bencode.GetString(temp.value, null);
+                    var ipCount = peerString.len / 6;
+                    //std.debug.print("peers({}): \n", .{ipCount});
+                    for (0..ipCount) |i| {
+                        var ip0 = peerString[i * 6 + 0];
+                        var ip1 = peerString[i * 6 + 1];
+                        var ip2 = peerString[i * 6 + 2];
+                        var ip3 = peerString[i * 6 + 3];
+                        var port0 = peerString[i * 6 + 4];
+                        var port1 = peerString[i * 6 + 5];
+                        var port = @as(u16, @intCast(port0)) << 8 | @as(u16, @intCast(port1));
+                        //std.debug.print("    [{}] {}.{}.{}.{}:{}\n", .{ i, ip0, ip1, ip2, ip3, port });
+                        try self.peers.append(network.EndPoint{
+                            .address = .{ .ipv4 = .{ .value = .{ ip0, ip1, ip2, ip3 } } },
+                            .port = port,
+                        });
+                    }
+                }
+            }
         },
         else => error.OperationNotSupported,
     };
