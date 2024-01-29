@@ -2,13 +2,18 @@ const std = @import("std");
 pub const bencode = @import("bencode.zig");
 const Torrent = @This();
 
+const FileInfo = struct {
+	length: u64,
+	path: []const u8,
+};
+
 const Info = struct {
     buffer: []const u8,
     length: u64,
     name: []const u8,
     pieceLength: u32,
     pieces: []const [20]u8,
-    files: [][]const u8,
+    files: []FileInfo,
 };
 
 buffer: []const u8,
@@ -22,13 +27,13 @@ info: Info,
 allocator: std.mem.Allocator,
 
 pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !Torrent {
-    const file = try std.fs.openFileAbsolute(path, .{});
-    defer file.close();
-    const file_size = (try file.stat()).size;
-
     var torrent: Torrent = undefined;
-    torrent.buffer = try file.readToEndAlloc(allocator, file_size);
     torrent.allocator = allocator;
+    const torrent_file = try std.fs.openFileAbsolute(path, .{});
+    defer torrent_file.close();
+    const file_size = (try torrent_file.stat()).size;
+
+    torrent.buffer = try torrent_file.readToEndAlloc(torrent.allocator, file_size);
     var readOffset: usize = 0;
     var dictIter = try bencode.GetDict(torrent.buffer, &readOffset);
 
@@ -38,8 +43,8 @@ pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !Torrent {
         if (std.mem.eql(u8, temp.key, "announce")) {
             torrent.announce = try bencode.GetString(temp.value, null);
         } else if (std.mem.eql(u8, temp.key, "announce-list")) {
-            var list = std.ArrayList([]const u8).init(allocator);
-            defer list.deinit();
+            var list = std.ArrayList([]const u8).init(torrent.allocator);
+            //defer list.deinit();
             var blist = try bencode.GetList(temp.value, null);
             var offset: usize = 0;
             while (offset < blist.len) {
@@ -70,21 +75,36 @@ pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !Torrent {
                     var allHashes = try bencode.GetString(infoPair.value, null);
                     var bytes = std.mem.sliceAsBytes(allHashes);
                     info.pieces = std.mem.bytesAsSlice([20]u8, bytes);
-                } else if (std.mem.eql(u8, infoPair.key, "files")) {
-                    var list = std.ArrayList([]const u8).init(allocator);
+                }
+				else if (std.mem.eql(u8, infoPair.key, "files")) {
+					var list = std.ArrayList(FileInfo).init(torrent.allocator);
                     defer list.deinit();
-                    var blist = try bencode.GetList(infoPair.value, null);
+					var blist = try bencode.GetList(infoPair.value, null);
                     var offset: usize = 0;
                     while (offset < blist.len) {
-                        var files = try bencode.GetDict(blist[offset..], &offset);
+					    var files = try bencode.GetDict(blist[offset..], &offset);
+						var fileinfo: FileInfo = undefined;
                         while (files.next()) |filePair| {
-                            if (std.mem.eql(u8, filePair.key, "length")) {
-                                info.length += try bencode.GetInt(u64, filePair.value, null);
+							if (std.mem.eql(u8, filePair.key, "length")) {
+								const length = try bencode.GetInt(u64, filePair.value, null);
+					            info.length += length;
+								fileinfo.length = length;
+								continue;
                             }
-                            try list.append(filePair.key);
+							if (std.mem.eql(u8, filePair.key, "path")) {
+								var flist = try bencode.GetList(filePair.value, null);
+								var flist_offset: usize = 0;
+                    			while (flist_offset < flist.len) {
+                    				var file = try bencode.GetString(flist[flist_offset..], &flist_offset);
+									fileinfo.path = file;
+                                	//try list.append(file);
+								}
+								continue;
+                            }
                         }
+						try list.append(fileinfo);
                     }
-                    torrent.info.files = try list.toOwnedSlice();
+					info.files = try list.toOwnedSlice();
                 }
             }
             torrent.infoHash = undefined;

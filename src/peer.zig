@@ -1,323 +1,373 @@
 const std = @import("std");
-const Torrent = @import("torrent.zig");
-const network = @import("network.zig");
+const builtin = @import("builtin");
+const net = std.net;
 
-const Self = @This();
+pub const InfoHash = [20]u8;
 
-const PeerState = packed struct {
-    Unchoked: bool,
-    Interested: bool,
+pub const PeerError = error {
+	NonCompletePacket,
+	IncompatibleProtocol,
+	MismatchedInfohash,
+	NotConnected,
+	InvalidPackedId,
+	NoBytesAvailable,
 };
 
-const TBitfield = std.packed_int_array.PackedIntSliceEndian(u1, std.builtin.Endian.Big);
+pub fn bytesAvailable(stream: net.Stream) !bool {
+	var poll_fd = std.mem.zeroes([1]std.os.pollfd);
+	poll_fd[0].fd = stream.handle;
+	poll_fd[0].events = std.os.POLL.IN;
+	var ready = try std.os.poll(&poll_fd, 0);
+	if(ready == 0) return false;
+	return (poll_fd[0].revents & std.os.POLL.IN != 0x0);
+}
+
+pub fn writable(stream: net.Stream) !bool {
+	var poll_fd = std.mem.zeroes([1]std.os.pollfd);
+	poll_fd[0].fd = stream.handle;
+	poll_fd[0].events = std.os.POLL.OUT;
+	var ready = try std.os.poll(&poll_fd, 0);
+	if(ready == 0) return false;
+	return (poll_fd[0].revents & std.os.POLL.OUT != 0x0);
+}
+
+pub const MAX_BLOCK_LENGTH = std.math.pow(u32, 2,14);
+
+pub const Block = struct {
+	allocator: std.mem.Allocator,
+	piece_idx: u32,
+	piece_offset: u32,
+	data: []const u8,
+};
+
+const PacketId = enum(u8) {
+	Choke = 0,
+	Unchoke = 1,
+	Interested = 2,
+	NotInterested = 3,
+	Have = 4,
+	Bitfield = 5,
+	Request = 6,
+	Piece = 7,
+	Cancel = 8,
+	Port = 9,
+};
 
 allocator: std.mem.Allocator,
-torrent: *Torrent,
-sock: network.Socket,
-handshake: bool,
-bitfielded: bool,
-id: ?[]u8,
-pieceByteCount: []u32,
-//bitfield: TBitfield,
-remoteBitfield: TBitfield,
-remoteState: PeerState, //instructions sent to remote
-localState: PeerState, //instructions sent to self
-scratchOffset: usize,
-scratch: []u8,
-//ringBuffer: RingBuffer,
 
-//temp
-//recvFile: std.fs.File,
-waitingForBlock: bool = false,
-requestingPiece: ?u32 = null,
+am_choking: bool,
+am_interested: bool,
+peer_choking: bool,
+peer_interested: bool,
 
-pub fn init(allocator: std.mem.Allocator, endpoint: network.EndPoint, bind_port: u16, torrent: *Torrent) !Self {
-    var self: Self = undefined;
+id: InfoHash,
+infoHash: InfoHash,
 
-    self.allocator = allocator;
+peer_connection: ?net.Stream,
+packet_stasis: std.ArrayList(u8),
+packet_stasis_offset: usize,
+processed_handshake: bool,
 
-    self.torrent = torrent;
+received_blocks: std.ArrayList(Block),
+remote_pieces: ?[]u8,
 
-    self.sock = try network.Socket.create(.ipv4, .tcp);
-    try self.sock.enablePortReuse(true);
-    try self.sock.bindToPort(bind_port);
-    try self.sock.setReadTimeout(1);
-    try self.sock.setWriteTimeout(1_000_000);
-    try self.sock.connect(endpoint);
+keep_alive_time: i64,
 
-    self.handshake = false;
-    self.bitfielded = false;
+log: std.fs.File,
 
-    self.pieceByteCount = try allocator.alloc(u32, torrent.file.info.pieces.len);
-    for (0..self.pieceByteCount.len) |i| {
-        self.pieceByteCount[i] = 0;
-    }
+pub fn init(allocator: std.mem.Allocator, peerID: InfoHash, infoHash: InfoHash, log: std.fs.File) !@This() {
+	var self: @This() = undefined;
+	self.allocator = allocator;
+	self.am_choking = true;
+	self.am_interested = false;
+	self.peer_choking = true;
+	self.peer_interested = false;
 
-    var byteCount = TBitfield.bytesRequired(self.torrent.file.info.pieces.len);
-    var remoteBitfieldBytes = try allocator.alloc(u8, byteCount);
-    @memset(remoteBitfieldBytes, 0);
-    self.remoteBitfield = TBitfield.init(remoteBitfieldBytes, torrent.file.info.pieces.len);
+	self.id = peerID;
+	self.infoHash = infoHash;
 
-    self.localState = .{ .Unchoked = false, .Interested = false };
-    self.remoteState = .{ .Unchoked = false, .Interested = false };
-    // self.recvFile = try std.fs.cwd().createFile(
-    // 	"recv.bin",
-    // 	.{ .read = false },
-    // );
+	self.packet_stasis = std.ArrayList(u8).init(allocator);
+	self.packet_stasis_offset = 0; 
+	self.processed_handshake = false;
 
-    //Attempt handshake and connection
-    const protocol: []const u8 = "BitTorrent protocol";
-    var sendBuf = std.mem.zeroes([49 + protocol.len]u8);
-    sendBuf[0] = protocol.len;
-    std.mem.copyForwards(u8, sendBuf[1..], protocol);
-    std.mem.copyForwards(u8, sendBuf[(1 + 8 + protocol.len)..], &torrent.file.infoHash);
-    std.mem.copyForwards(u8, sendBuf[(1 + 8 + protocol.len + 20)..], &torrent.file.infoHash);
-    _ = try self.sock.send(&sendBuf);
+	self.received_blocks = @TypeOf(self.received_blocks).init(allocator);
+	self.remote_pieces = null;
+	
+	self.keep_alive_time = 0;
 
-    //var scratch = std.mem.zeroes([49+255]u8);
-    //var recvInfo = try self.sock.receive(&scratch);
-    //std.debug.print("{any}\n", .{scratch[0..recvInfo]});
-
-    self.scratch = try allocator.alloc(u8, 1000000);
-
-    self.scratchOffset = 0;
-    @memset(self.scratch[0..], 0);
-
-    //self.ringBuffer.init();
-
-    self.requestingPiece = null;
-
-    self.id = null;
-
-    return self;
+	self.log = log;
+	return self;
 }
 
 pub fn deinit(self: *@This()) void {
-    if (self.id) |id| self.allocator.free(id);
-    self.allocator.free(self.pieceByteCount);
-    self.allocator.free(self.remoteBitfield.bytes);
-    self.allocator.free(self.scratch);
-    self.remoteBitfield = undefined;
-    self.sock.close();
+	self.packet_stasis.deinit();
+	self.received_blocks.deinit();
+	if(self.remote_pieces) |remote_pieces| self.allocator.free(remote_pieces);
 }
 
-pub fn parsePacket(self: *@This(), data: []const u8) !usize {
-    if (self.handshake == false) {
-        if (data.len < 1) return 0;
-        var protocolNameLen = data[0];
-        if (data.len < 49 + protocolNameLen) return 0;
-        var protocolName = data[1..][0..protocolNameLen];
-        if (!std.mem.eql(u8, protocolName, "BitTorrent protocol")) return error.OperationNotSupported;
-        var infoHash = data[(1 + protocolNameLen + 8)..][0..20];
-        if (!std.mem.eql(u8, infoHash, &self.torrent.file.infoHash)) return error.OperationNotSupported;
+pub fn connect(self: *@This(), address: net.Address) !void {
+	//self.peer_connection = try net.tcpConnectToAddress(address);
+	const nonblock = std.os.SOCK.NONBLOCK;
+    const sock_flags = std.os.SOCK.STREAM | nonblock |
+        (if (builtin.target.os.tag == .windows) 0 else std.os.SOCK.CLOEXEC);
+    const sockfd = try std.os.socket(address.any.family, sock_flags, std.os.IPPROTO.TCP);
+    errdefer std.os.closeSocket(sockfd);
 
-        var peerId = data[(1 + protocolNameLen + 8 + 20)..][0..20];
-        self.id = try std.Uri.escapeString(self.allocator, peerId);
+	//Timeout is 1 seconds to avoid disconnecting from other peers
+	const micros: u32 = 1 * std.time.us_per_s;
+	
+	if (builtin.target.os.tag == .windows) {
+		var val: u32 = @divTrunc(micros, 1000);
+		try std.os.windows.setsockopt(sockfd, std.os.SOL.SOCKET, std.os.SO.RCVTIMEO, std.mem.asBytes(&val));
+	} else {
+		var read_timeout: std.os.timeval = undefined;
+		read_timeout.tv_sec = @intCast(@divTrunc(micros, 1000000));
+		read_timeout.tv_usec = @intCast(@mod(micros, 1000000));
+		try std.os.setsockopt(sockfd, std.os.SOL.SOCKET, std.os.SO.RCVTIMEO, std.mem.toBytes(read_timeout)[0..]);
+	}
+	
+	var server_addr = address.any;
+	std.os.connect(sockfd, &server_addr, @sizeOf(@TypeOf(server_addr))) catch |err| {
+		if (err != error.WouldBlock) {
+			return err;
+		}
+	};
 
-        self.handshake = true;
-        return 49 + protocolNameLen;
-    }
-    var size: u32 = std.mem.readIntBig(u32, data[0..4]);
-    if (size == 0) {
-        std.debug.print("[{?s}] keep alive!\n", .{self.id});
-        _ = try self.sock.send("\x00\x00\x00\x00");
-        return 4;
-    }
+	self.keep_alive_time = std.time.milliTimestamp();
 
-	//std.debug.print("[{?s}] packet: {any}\n", .{self.id, data[0..size+4]});
-
-    size -= 1;
-    var op = data[4];
-    var args = data[5..];
-    switch (op) {
-        0 => { //choke
-            std.debug.print("[{?s}] choke\n", .{self.id});
-            self.localState.Unchoked = false;
-        },
-        1 => { //unchoke
-            std.debug.print("[{?s}] unchoke\n", .{self.id});
-            self.localState.Unchoked = true;
-        },
-        2 => { //interested
-            std.debug.print("[{?s}] interested\n", .{self.id});
-            self.localState.Interested = true;
-        },
-        3 => { //not interested
-            std.debug.print("[{?s}] not interested\n", .{self.id});
-            self.localState.Interested = false;
-        },
-        4 => { //have
-            std.debug.print("[{?s}] have\n", .{self.id});
-            var pieceIdx = std.mem.readIntBig(u32, args[0..4]);
-            self.remoteBitfield.set(pieceIdx, 1);
-        },
-        5 => { //bitfield
-            if (self.bitfielded) return error.BitfieldAlreadyRecvd;
-            self.bitfielded = true;
-            std.debug.print("[{?s}] bitfield ({d})({any})\n", .{ self.id, args[0..size].len, args[0..size] });
-            std.mem.copyForwards(u8, self.remoteBitfield.bytes, args[0..size]);
-        },
-        6 => { //request
-            std.debug.print("[{?s}] request\n", .{self.id});
-        },
-        7 => { //piece
-            var pieceIdx = std.mem.readIntBig(u32, args[0..4]);
-            var beginOffset = std.mem.readIntBig(u32, args[4..8]);
-            std.debug.print("[{?s}] piece ({}, {}, {})\n", .{ self.id, pieceIdx, beginOffset, size-8 });
-            self.pieceByteCount[pieceIdx] = beginOffset + size - 8;
-            if (self.pieceByteCount[pieceIdx] >= self.torrent.file.info.pieceLength) {
-                self.torrent.bitfield.set(pieceIdx, 1);
-                try self.Have(pieceIdx);
-                self.requestingPiece = null;
-            }
-            self.waitingForBlock = false;
-            var fileOffset = beginOffset + pieceIdx * self.torrent.file.info.pieceLength;
-            var writeData = args[8..size];
-            try self.torrent.outfile.pwriteAll(writeData, fileOffset);
-            //try self.torrent.writelist.write(self.allocator, fileOffset, fileOffset + writeData.len);
-        },
-        8 => { //cancel
-            std.debug.print("[{?s}] cancel\n", .{self.id});
-        },
-        else => return error.InvalidPacketID,
-    }
-    return size + 5;
+    self.peer_connection = std.net.Stream{ .handle = sockfd };
 }
 
-pub fn Choke(self: *@This()) !void {
-    std.debug.print("Sending Choke...\n", .{});
-    _ = try self.sock.send("\x00\x00\x00\x01\x00");
-    self.remoteState.Unchoked = false;
+pub fn pollConnected(self: *@This()) !bool {
+	if(self.peer_connection == null) return false;
+	var poll_fds = std.mem.zeroes([1]std.os.pollfd);
+	poll_fds[0].fd = self.peer_connection.?.handle;
+	poll_fds[0].events = std.os.POLL.OUT;
+	var result: usize = std.os.poll(&poll_fds, 0) catch |err| blk: {
+		if(err != error.WouldBlock) return err;
+		break :blk 0;
+	};
+	if (result == 0 and self.keep_alive_time + 60_000 < std.time.milliTimestamp()) {
+		return error.ConnectionTimedOut;
+	}
+	if(result > 0) {
+		if(poll_fds[0].revents & std.os.POLL.ERR > 0) return error.PollFailed;
+		if(poll_fds[0].revents & std.os.POLL.NVAL > 0) return error.PollFailed;
+		if(poll_fds[0].revents & std.os.POLL.HUP > 0) return error.PollFailed;
+		if(poll_fds[0].revents & std.os.POLL.OUT > 0) {
+			var flags: usize = try std.os.fcntl(self.peer_connection.?.handle, 3, 0);
+			flags &= ~@as(usize, std.os.O.NONBLOCK);
+			_ = try std.os.fcntl(self.peer_connection.?.handle, 3, 0);
+			return true;
+		}
+	}
+	return false;
 }
 
-pub fn Unchoke(self: *@This()) !void {
-    std.debug.print("Sending Unchoke...\n", .{});
-    _ = try self.sock.send("\x00\x00\x00\x01\x01");
-    self.remoteState.Unchoked = true;
+pub fn disconnect(self: *@This()) void {
+	if(self.peer_connection) |conn| {
+		conn.close();
+	}
+	self.peer_connection = null;
+	self.am_choking = true;
+	self.am_interested = false;
+	self.peer_choking = true;
+	self.peer_interested = false;
+	self.processed_handshake = false;
+	self.packet_stasis.clearAndFree();
+	self.packet_stasis_offset = 0;
+
+	while(self.received_blocks.popOrNull()) |block| {
+		self.allocator.free(block.data);
+	}
 }
 
-pub fn Interested(self: *@This()) !void {
-    std.debug.print("Sending Interested...\n", .{});
-    _ = try self.sock.send("\x00\x00\x00\x01\x02");
-    self.remoteState.Interested = true;
+fn readLenFromStream(self: *@This(), len: usize) ![]u8 {
+	if(self.packet_stasis_offset + len < self.packet_stasis.items.len) {
+		self.packet_stasis_offset += len;
+		return self.packet_stasis.items[self.packet_stasis_offset-len..][0..len];
+	}
+	const lengthNeeded = self.packet_stasis_offset + len - self.packet_stasis.items.len;
+	if(!try bytesAvailable(self.peer_connection.?))
+		return PeerError.NonCompletePacket;
+	try self.packet_stasis.ensureUnusedCapacity(lengthNeeded);
+	var read_count = try self.peer_connection.?.read(self.packet_stasis.unusedCapacitySlice()[0..lengthNeeded]);
+	if(read_count == 0) {
+		self.disconnect();
+		return PeerError.NotConnected;
+	}
+	_ = self.packet_stasis.addManyAsSliceAssumeCapacity(read_count);
+	if(read_count == lengthNeeded) {
+		self.packet_stasis_offset += len;
+		return self.packet_stasis.items[self.packet_stasis_offset-len..][0..len];
+	}
+	return PeerError.NonCompletePacket;
 }
 
-pub fn NotInterested(self: *@This()) !void {
-    std.debug.print("Sending Not Interested...\n", .{});
-    _ = try self.sock.send("\x00\x00\x00\x01\x03");
-    self.remoteState.Interested = false;
-}
+pub fn processInteral(self: *@This()) !void {
+	self.packet_stasis_offset = 0;
+	if(!self.processed_handshake) {
+		//Read Protocol Length
+		const protocol_length_raw = try self.readLenFromStream(1);
+		const protocol_length = protocol_length_raw[0];
+		const protocol = try self.readLenFromStream(protocol_length);
+		if(!std.mem.eql(u8, protocol, "BitTorrent protocol"))
+			return PeerError.IncompatibleProtocol;
+		const reserved_raw = try self.readLenFromStream(8);
+		_ = reserved_raw; //Throw away reserved bytes, not used
+		const infoHash = try self.readLenFromStream(20);
+		if(!std.mem.eql(u8, infoHash, &self.infoHash))
+			return PeerError.MismatchedInfohash;
+		const peerid = try self.readLenFromStream(20);
+		_ = peerid; //Throw away peer id, not needed
+		self.processed_handshake = true;
+		try std.fmt.format(self.log.writer(), "> Handshake\n", .{});
+	} else {
+		//Emit keep alive if needed
+		if(self.keep_alive_time + 10 * std.time.ms_per_s <= std.time.milliTimestamp()) {
+			try self.alive();
+		}
+		//Read Packet Length
+		const packet_length_raw = try self.readLenFromStream(4);
+		const packet_length = std.mem.readIntBig(u32, packet_length_raw[0..4]);
+		if(packet_length == 0) {
+			try std.fmt.format(self.log.writer(), "> Alive\n", .{});
+			try self.alive();
+			self.packet_stasis.clearRetainingCapacity();
+			return;
+		}
+		const packet = try self.readLenFromStream(packet_length);
+		const packet_id: PacketId = @enumFromInt(packet[0]);
+		switch(packet_id) {
+			.Unchoke => {
+				try std.fmt.format(self.log.writer(), "> Unchoked\n", .{});
+				self.peer_choking = false;
+			},
+			.Interested => {
+				try std.fmt.format(self.log.writer(), "> Interested\n", .{});
+				self.peer_interested = true;
+			},
+			.Have => {
+				try std.fmt.format(self.log.writer(), "> Have\n", .{});
+				var index = std.mem.readIntBig(u32, packet[1..5]);
+				const byteOffset = @divTrunc(index, 8);
+				const bitOffset: u3 = @intCast(7 - @mod(index, 8));
+				self.remote_pieces.?[byteOffset] |= @as(u8,1) << bitOffset;
+			},
+			.Bitfield => {
+				try std.fmt.format(self.log.writer(), "> Bitfield\n", .{});
+				const bitfield_byte_count = packet_length-1;
+				const bitfield_bit_count = bitfield_byte_count*8;
+				_ = bitfield_bit_count;
+				//try self.remote_pieces.resize(bitfield_bit_count, false);
 
-pub fn Have(self: *@This(), pieceIdx: u32) !void {
-    std.debug.print("Sending Have({d})...\n", .{pieceIdx});
-    var data: [9]u8 = undefined;
-    std.mem.copyForwards(u8, data[0..], "\x00\x00\x00\x05\x04");
-    std.mem.writeIntBig(u32, data[5..][0..4], pieceIdx);
-    _ = try self.sock.send(&data);
-}
-
-pub fn Bitfield(self: *@This()) !void {
-    std.debug.print("Sending Bitfield...\n", .{});
-    var length: u32 = @intCast(self.bitfield.bytes.len);
-    var data: []u8 = try self.allocator.alloc(u8, length + 1 + 4);
-    defer self.allocator.free(data);
-    std.mem.writeIntBig(u32, data[0..][0..4], length + 1);
-    std.mem.copyForwards(u8, data[4..], "\x05");
-    std.mem.copyForwards(u8, data[5..], self.bitfield.bytes);
-    _ = try self.sock.send(data);
-}
-
-pub fn GetBlock(self: *@This(), piece: u32, offset: u32) !void {
-    std.debug.print("Send Get Block ({d}, {d}) ", .{ piece, offset });
-    var pieceLen = self.torrent.file.info.pieceLength;
-    var length: u32 = 1 << 14;
-    if (offset + length > pieceLen) {
-		std.debug.print("{} {} {}\n", .{offset, length, pieceLen});
-        length = pieceLen - offset;
-    }
-    std.debug.print("[Length: {d}]\n", .{length});
-    var data: [17]u8 = undefined;
-    std.mem.copyForwards(u8, data[0..], "\x00\x00\x00\x0d\x06");
-    std.mem.writeIntBig(u32, data[5..][0..4], piece);
-    std.mem.writeIntBig(u32, data[9..][0..4], offset);
-    std.mem.writeIntBig(u32, data[13..][0..4], length);
-    _ = try self.sock.send(&data);
-    self.waitingForBlock = true;
-    self.torrent.requestBitfield.set(piece, 1);
-    self.requestingPiece = piece;
-}
-
-pub fn GetNextBlock(self: *@This()) !void {
-    var piece: u32 = blk: {
-        if (self.requestingPiece) |i| break :blk i;
-        for (self.pieceByteCount, 0..) |bytes, i| {
-            if (self.torrent.bitfield.get(i) == 1) continue;
-            if (self.remoteBitfield.get(i) == 0) continue;
-            if (self.torrent.requestBitfield.get(i) == 1) continue;
-            var pieceLen = self.torrent.file.info.pieceLength;
-            if (i == self.torrent.file.info.pieces.len - 1) {
-                pieceLen = @intCast(self.torrent.file.info.length - self.torrent.file.info.pieceLength * (self.torrent.file.info.pieces.len - 1));
-            }
-            if (bytes < pieceLen) {
-                break :blk @intCast(@as(u64, i));
-            }
-        } else {
-            return error.NoPieceLeft;
-        }
-        break :blk 0;
-    };
-    try self.GetBlock(piece, self.pieceByteCount[piece]);
-}
-
-pub fn GetBlockCount(self: *@This()) usize {
-    var count: usize = 0;
-    for (self.pieceByteCount, 0..) |_, i| {
-        count += self.remoteBitfield.get(i);
-    }
-    return count;
-}
-
-pub fn recieve(self: *@This()) !void {
-    //Limit packets to 1000
-    for (0..1000) |_| {
-        self.scratchOffset += self.sock.receive(self.scratch[self.scratchOffset..]) catch |err| {
-            if (err == network.Socket.ReceiveError.WouldBlock) {
-                return;
-            }
-            return err;
-        };
-    }
-}
-
-fn validPacket(self: *@This(), bytes: []const u8) bool {
-	var temp: usize = bytes.len;
-	_ = temp;
-	//std.debug.print("{d}\n", .{bytes[0..temp]});
-    if (self.handshake == false) {
-        if (bytes.len < 1) return false;
-        var protocolNameLen = bytes[0];
-        if (bytes.len < protocolNameLen + 49) return false;
-        return true;
-    }
-    if (bytes.len < 4) return false;
-    var sizeU32 = self.scratch[0..4];
-    var size: u32 = std.mem.readIntBig(u32, sizeU32);
-    if (bytes.len < 4 + size) return false;
-    return true;
+				self.remote_pieces = try self.allocator.alloc(u8, bitfield_byte_count);
+				@memset(self.remote_pieces.?, 0);
+				std.mem.copyBackwards(u8, self.remote_pieces.?, packet[1..]);
+			},
+			.Piece => {
+				var index = std.mem.readIntBig(u32, packet[1..5]);
+				var begin = std.mem.readIntBig(u32, packet[5..9]);
+				var block = packet[9..];
+				try self.received_blocks.append(.{
+					.allocator = self.allocator,
+					.piece_idx = index,
+					.piece_offset = begin,
+					.data = try self.allocator.dupe(u8, block),
+				});
+				try std.fmt.format(self.log.writer(), "> Piece({},{},{})\n", .{index, begin, block.len});
+			},
+			else => {
+				try std.fmt.format(self.log.writer(), "Invalid PacketID Recvd: {}\n", .{packet_id});
+				return PeerError.InvalidPackedId;
+			}
+		}
+	}
+	self.packet_stasis.clearRetainingCapacity();
 }
 
 pub fn process(self: *@This()) !void {
-    try self.recieve();
+	self.processInteral() catch |err| {
+		if(err == PeerError.NonCompletePacket) return;
+		return err;
+	};
+}
 
-    while (true) {
-        if (self.scratchOffset < 4) return;
+pub fn processLimit(self: *@This(), limit: usize) !void {
+	for(0..limit) |_| {
+		self.processInteral() catch |err| {
+			if(err == PeerError.NonCompletePacket) return;
+			return err;
+		};
+	}
+}
 
-        var packet: []const u8 = self.scratch;
-        if (!self.validPacket(packet[0..self.scratchOffset])) {
-            return;
-        }
-        var packetSize: usize = try self.parsePacket(packet);
-        self.scratchOffset -= packetSize;
-        std.mem.copyForwards(u8, self.scratch, self.scratch[packetSize..]);
-    }
+pub fn handshake(self: *@This()) !void {
+	if(self.peer_connection == null) return PeerError.NotConnected;
+	const protocol: []const u8 = "BitTorrent protocol";
+	var sendBuf = std.mem.zeroes([49 + protocol.len]u8);
+	sendBuf[0] = protocol.len;
+	std.mem.copyForwards(u8, sendBuf[1..], protocol);
+	std.mem.copyForwards(u8, sendBuf[(1 + 8 + protocol.len)..], &self.infoHash);
+	std.mem.copyForwards(u8, sendBuf[(1 + 8 + protocol.len + 20)..], &self.id);
+	try self.peer_connection.?.writeAll(&sendBuf);
+	try std.fmt.format(self.log.writer(), "< Handshake [{s}]\n", .{std.fmt.fmtSliceHexLower(&sendBuf)});
+	self.keep_alive_time = std.time.milliTimestamp();
+}
+
+pub fn bitfield(self: *@This(), bitset: []u8) !void {
+	if(self.peer_connection == null) return PeerError.NotConnected;
+	var length: u32 = @intCast(bitset.len);
+	var sendBuf = try self.allocator.alloc(u8, 5+length);
+	defer self.allocator.free(sendBuf);
+	std.mem.writeIntBig(u32, sendBuf[0..4], length+1);
+	std.mem.writeIntBig(u8, sendBuf[4..5], '\x05');
+	std.mem.copy(u8, sendBuf[5..], bitset);
+	try self.peer_connection.?.writeAll(sendBuf);
+	try std.fmt.format(self.log.writer(), "< Bitfield [{s}]\n", .{std.fmt.fmtSliceHexLower(sendBuf)});
+	self.keep_alive_time = std.time.milliTimestamp();
+}
+
+pub fn alive(self: *@This()) !void {
+	if(self.peer_connection == null) return PeerError.NotConnected;
+	var sendBuf = "\x00\x00\x00\x00";
+	try self.peer_connection.?.writeAll(sendBuf);
+	self.am_interested = true;
+	try std.fmt.format(self.log.writer(), "< Alive [{s}]\n", .{std.fmt.fmtSliceHexLower(sendBuf)});
+	self.keep_alive_time = std.time.milliTimestamp();
+}
+
+pub fn interested(self: *@This()) !void {
+	if(self.peer_connection == null) return PeerError.NotConnected;
+	var sendBuf = "\x00\x00\x00\x01\x02";
+	try self.peer_connection.?.writeAll(sendBuf);
+	self.am_interested = true;
+	try std.fmt.format(self.log.writer(), "< Interested [{s}]\n", .{std.fmt.fmtSliceHexLower(sendBuf)});
+	self.keep_alive_time = std.time.milliTimestamp();
+}
+
+pub fn request(self: *@This(), index: u32, begin: u32, length: u32) !void {
+	if(self.peer_connection == null) return PeerError.NotConnected;
+	var sendBuf = std.mem.zeroes([17]u8);
+	std.mem.writeIntBig(u32, sendBuf[0..4], 13); //packet length
+	std.mem.writeIntBig(u8, sendBuf[4..5], 6); //packet id
+	std.mem.writeIntBig(u32, sendBuf[5..9], index); //index
+	std.mem.writeIntBig(u32, sendBuf[9..13], begin); //begin
+	std.mem.writeIntBig(u32, sendBuf[13..17], length); //length
+	try self.peer_connection.?.writeAll(&sendBuf);
+	try std.fmt.format(self.log.writer(), "< Request [{s}]\n", .{std.fmt.fmtSliceHexLower(&sendBuf)});
+	self.keep_alive_time = std.time.milliTimestamp();
+}
+
+pub fn cancel(self: *@This(), index: u32, begin: u32, length: u32) !void {
+	if(self.peer_connection == null) return PeerError.NotConnected;
+	var sendBuf = std.mem.zeroes([17]u8);
+	std.mem.writeIntBig(u32, sendBuf[0..4], 13); //packet length
+	std.mem.writeIntBig(u8, sendBuf[4..5], 8); //packet id
+	std.mem.writeIntBig(u32, sendBuf[5..9], index); //index
+	std.mem.writeIntBig(u32, sendBuf[9..13], begin); //begin
+	std.mem.writeIntBig(u32, sendBuf[13..17], length); //length
+	try self.peer_connection.?.writeAll(&sendBuf);
+	try std.fmt.format(self.log.writer(), "< Cancel [{s}]\n", .{std.fmt.fmtSliceHexLower(&sendBuf)});
+	self.keep_alive_time = std.time.milliTimestamp();
 }
