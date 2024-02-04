@@ -42,7 +42,8 @@ pub fn init(allocator: std.mem.Allocator) !@This() {
 }
 
 pub fn deinit(self: @This()) void {
-	self.packet_stasis.deinit();
+	self.allocator.free(self.peers);
+	self.allocator.free(self.packet_stasis);
 }
 
 const ConnectionType = enum {
@@ -160,14 +161,14 @@ pub fn disconnect(self: @This()) !void {
 	
 }
 
-pub const AnnounceEvent = enum(u32) {
+pub const AnnounceCoroutine = enum(u32) {
 	None = 0,
 	Completed = 1,
 	Started = 2,
 	Stopped = 3,
 };
 
-pub fn announce(self: *@This(), infohash: [20]u8, peer_id: [20]u8, downloaded: u64, left: u64, uploaded: u64, event: AnnounceEvent, ip_address: u32, key: u32, num_want: u32, port: u16) !void {
+pub fn announce(self: *@This(), infohash: [20]u8, peer_id: [20]u8, downloaded: u64, left: u64, uploaded: u64, coroutine: AnnounceCoroutine, ip_address: u32, key: u32, num_want: u32, port: u16) !void {
 	switch(self.connection_type) {
 		.UDP => {
 			self.transaction_id += 1;
@@ -181,7 +182,7 @@ pub fn announce(self: *@This(), infohash: [20]u8, peer_id: [20]u8, downloaded: u
 			std.mem.writeIntBig(u64, sendBuf[56..][0..@sizeOf(u64)], downloaded);
 			std.mem.writeIntBig(u64, sendBuf[64..][0..@sizeOf(u64)], left);
 			std.mem.writeIntBig(u64, sendBuf[72..][0..@sizeOf(u64)], uploaded);
-			std.mem.writeIntBig(u32, sendBuf[80..][0..@sizeOf(u32)], @intFromEnum(event));
+			std.mem.writeIntBig(u32, sendBuf[80..][0..@sizeOf(u32)], @intFromEnum(coroutine));
 			std.mem.writeIntBig(u32, sendBuf[84..][0..@sizeOf(u32)], ip_address);
 			std.mem.writeIntBig(u32, sendBuf[88..][0..@sizeOf(u32)], key);
 			std.mem.writeIntBig(u32, sendBuf[92..][0..@sizeOf(u32)], num_want);

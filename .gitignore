@@ -1,3 +1,8 @@
 .vscode/
 zig-out/
 zig-cache/
+downloads/
+logs/
+torrents/
+torrents/*
+torrents.disabled/

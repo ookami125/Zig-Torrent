@@ -137,6 +137,52 @@ pub fn RangeArray(comptime T: type) type {
 			}
 		}
 
+		pub fn check(arg_array: *@This(), arg_start: T, arg_end: T) bool {
+			var array = arg_array;
+			var start = arg_start;
+			var end = arg_end;
+			var i: usize = 0;
+			while ((i < array.ranges.len) and (end >= array.ranges[i].start)) {
+				if (start >= array.ranges[i].end) {
+					i += 1;
+				} else if (end <= array.ranges[i].start) {
+					break;
+				} else {
+					if ((start <= array.ranges[i].start) and (end >= array.ranges[i].end)) {
+						return true;
+					} else if ((start > array.ranges[i].start) and (end < array.ranges[i].end)) {
+						return true;
+					} else if ((start <= array.ranges[i].start) and (end < array.ranges[i].end)) {
+						return true;
+					} else if ((start > array.ranges[i].start) and (end >= array.ranges[i].end)) {
+						return true;
+					}
+					break;
+				}
+			}
+			return false;
+		}
+
+		pub fn checkAll(arg_array: *@This(), arg_start: T, arg_end: T) bool {
+			var array = arg_array;
+			var start = arg_start;
+			var end = arg_end;
+			var i: usize = 0;
+			while ((i < array.ranges.len) and (end >= array.ranges[i].start)) {
+				if (start >= array.ranges[i].end) {
+					i += 1;
+				} else if (end <= array.ranges[i].start) {
+					break;
+				} else {
+					if ((start >= array.ranges[i].start) and (end <= array.ranges[i].end)) {
+						return true;
+					}
+					break;
+				}
+			}
+			return false;
+		}
+
 		pub fn split(arg_array: *@This(), arg_value: T) !void {
 			var array = arg_array;
 			var value = arg_value;

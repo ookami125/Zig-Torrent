@@ -1,6 +1,7 @@
 const std = @import("std");
 pub const bencode = @import("bencode.zig");
 const Torrent = @This();
+pub const Hash = [20]u8;
 
 const FileInfo = struct {
 	length: u64,
@@ -12,7 +13,7 @@ const Info = struct {
     length: u64,
     name: []const u8,
     pieceLength: u32,
-    pieces: []const [20]u8,
+    pieces: []const Hash,
     files: []FileInfo,
 };
 
@@ -22,7 +23,7 @@ announce_list: ?[][]const u8,
 createdBy: []const u8,
 creationDate: []const u8,
 encoding: []const u8,
-infoHash: [20]u8,
+infoHash: Hash,
 info: Info,
 allocator: std.mem.Allocator,
 
@@ -74,7 +75,7 @@ pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !Torrent {
                 } else if (std.mem.eql(u8, infoPair.key, "pieces")) {
                     var allHashes = try bencode.GetString(infoPair.value, null);
                     var bytes = std.mem.sliceAsBytes(allHashes);
-                    info.pieces = std.mem.bytesAsSlice([20]u8, bytes);
+                    info.pieces = std.mem.bytesAsSlice(Hash, bytes);
                 }
 				else if (std.mem.eql(u8, infoPair.key, "files")) {
 					var list = std.ArrayList(FileInfo).init(torrent.allocator);

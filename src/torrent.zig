@@ -1,14 +1,16 @@
 const std = @import("std");
+const Peer = @import("peer.zig");
 const TorrentInfo = @import("torrentInfo.zig");
-const TBitfield = std.packed_int_array.PackedIntSliceEndian(u1, std.builtin.Endian.Big);
+pub const TBitfield = std.packed_int_array.PackedIntSliceEndian(u1, std.builtin.Endian.Big);
 const RndGen = std.rand.DefaultPrng;
 const Torrent = @This();
 const RangeArray = @import("RangeArray.zig").RangeArray;
+pub const Hash = TorrentInfo.Hash;
 
 allocator: std.mem.Allocator,
 file: TorrentInfo,
 bitfield: TBitfield,
-requestBitfield: TBitfield,
+//requestBitfield: TBitfield,
 outfile: std.fs.File,
 notDownloaded: RangeArray(usize),
 downloaded: RangeArray(usize),
@@ -25,9 +27,9 @@ pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !Torrent {
     @memset(bitfieldBytes, 0);
     self.bitfield = TBitfield.init(bitfieldBytes, self.file.info.pieces.len);
 
-    var requestBitfieldBytes = try allocator.alloc(u8, byteCount);
-    @memset(requestBitfieldBytes, 0);
-    self.requestBitfield = TBitfield.init(requestBitfieldBytes, self.file.info.pieces.len);
+    //var requestBitfieldBytes = try allocator.alloc(u8, byteCount);
+    //@memset(requestBitfieldBytes, 0);
+    //self.requestBitfield = TBitfield.init(requestBitfieldBytes, self.file.info.pieces.len);
 
 	var name = std.fs.path.basename(path);
 	var dirname = try std.fmt.allocPrint(allocator, "downloads/{s}", .{name});
@@ -37,7 +39,7 @@ pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !Torrent {
 	};
     allocator.free(dirname);
 	
-	self.outfile = try outdir.createFile("file.bin", .{ .read = false });
+	self.outfile = try outdir.createFile("file.bin", .{ .read = true });
 	
 	var extractFile = try outdir.createFile("extractor.sh", .{ .read = false });
 	
@@ -69,13 +71,23 @@ pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !Torrent {
     return self;
 }
 
-pub fn deinit(self: @This()) void {
+pub fn deinit(self: *@This()) void {
     self.outfile.close();
     self.allocator.free(self.bitfield.bytes);
-    self.allocator.free(self.requestBitfield.bytes);
+    //self.allocator.free(self.requestBitfield.bytes);
+	self.downloaded.deinit();
+	self.notDownloaded.deinit();
     self.file.deinit();
 }
 
 pub fn getSize(self: @This()) u64 {
 	return self.file.info.length;
+}
+
+pub fn getDownloaded(self: @This()) u64 {
+	var sum: u64 = 0;
+	for(self.downloaded.ranges) |range| {
+		sum += range.length();
+	}
+	return sum;
 }
