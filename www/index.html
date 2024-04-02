@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@300&display=swap" rel="stylesheet">
+    <style>
+		h2 {
+			font: 14px Arial, sans-serif;
+            color: #fff;
+            padding: 10px;
+            text-align: center;
+        }
+		
+        html,
+        body {
+			height: 100%;
+        }
+		
+        * {
+			font-family: "Fira Code", monospace;
+			font-optical-sizing: auto;
+			font-weight: 300;
+			font-style: normal;
+
+            margin: 0;
+            padding: 0;
+            list-style-type: none;
+        }
+
+        #peerList {
+            width: 100%;
+            height: 100%;
+            position: absolute;
+            top: 0;
+            left: 0;
+            background: #222;
+			overflow-y: scroll;
+        }
+
+        #peerList li {
+            cursor: move;
+            border-bottom: 1px solid #000;
+            border-top: 1px solid #333;
+            cursor: pointer;
+            padding: 10px 5px;
+            color: #BBB;
+            background: #1a1a1a;
+            font: 12px Arial, sans-serif;
+        }
+
+        #peerList li:hover {
+            background: #111;
+            color: #CCC;
+        }
+
+        #torrentList {
+            width: 100%;
+            height: 100%;
+            position: absolute;
+            top: 0;
+            left: 0;
+            background: #222;
+			overflow-y: scroll;
+        }
+
+        #torrentList li {
+            cursor: move;
+            border-bottom: 1px solid #000;
+            border-top: 1px solid #333;
+            cursor: pointer;
+            padding: 10px 5px;
+            color: #BBB;
+            background: #1a1a1a;
+            font: 12px Arial, sans-serif;
+        }
+
+        #torrentList li:hover {
+            background: #111;
+            color: #CCC;
+        }
+
+        #layoutContainer {
+            width: 100%;
+            height: 100%;
+            position: absolute;
+            top: 0;
+            left: 0;
+            box-shadow: -3px 0px 9px 0px rgba(0, 0, 0, 0.4);
+        }
+
+        body {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            overflow: hidden;
+        }
+
+		#incoming {
+			height: 200px;
+			overflow-y: scroll;
+			border: #BBB;
+			border-radius: 3px;
+		}
+
+		#rootStruct {
+			height: 100%;
+			overflow-y: scroll;
+			border: #BBB;
+			border-radius: 3px;
+		}
+    </style>
+</head>
+
+<body translate="no">
+    <script type="text/javascript" src="https://code.jquery.com/jquery-1.11.1.min.js"></script>
+    <script type="text/javascript" src="https://golden-layout.com/files/latest/js/goldenlayout.min.js"></script>
+    <link type="text/css" rel="stylesheet" href="https://golden-layout.com/files/latest/css/goldenlayout-base.css" />
+    <link type="text/css" rel="stylesheet"
+        href="https://golden-layout.com/files/latest/css/goldenlayout-dark-theme.css" />
+    
+	<div id="layoutContainer"></div>
+    
+    <script src='https://cdnjs.cloudflare.com/ajax/libs/jquery/2.1.3/jquery.min.js'></script>
+    <script src='index.js'></script>
+</body>
+
+</html>

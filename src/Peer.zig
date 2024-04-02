@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const net = std.net;
+const NetUtils = @import("NetUtils.zig");
 
 pub const InfoHash = [20]u8;
 
@@ -13,20 +14,11 @@ pub const PeerError = error {
 	NoBytesAvailable,
 };
 
-pub fn bytesAvailable(stream: net.Stream) !bool {
-	var poll_fd = std.mem.zeroes([1]std.os.pollfd);
-	poll_fd[0].fd = stream.handle;
-	poll_fd[0].events = std.os.POLL.IN;
-	var ready = try std.os.poll(&poll_fd, 0);
-	if(ready == 0) return false;
-	return (poll_fd[0].revents & std.os.POLL.IN != 0x0);
-}
-
 pub fn writable(stream: net.Stream) !bool {
 	var poll_fd = std.mem.zeroes([1]std.os.pollfd);
 	poll_fd[0].fd = stream.handle;
 	poll_fd[0].events = std.os.POLL.OUT;
-	var ready = try std.os.poll(&poll_fd, 0);
+	const ready = try std.os.poll(&poll_fd, 0);
 	if(ready == 0) return false;
 	return (poll_fd[0].revents & std.os.POLL.OUT != 0x0);
 }
@@ -66,7 +58,8 @@ am_interested: bool,
 peer_choking: bool,
 peer_interested: bool,
 
-id: InfoHash,
+self_id: InfoHash,
+remote_id: InfoHash,
 infoHash: InfoHash,
 
 peer_connection: ?net.Stream,
@@ -90,7 +83,7 @@ pub fn init(allocator: std.mem.Allocator, peerID: InfoHash, infoHash: InfoHash, 
 	self.peer_choking = true;
 	self.peer_interested = false;
 
-	self.id = peerID;
+	self.self_id = peerID;
 	self.infoHash = infoHash;
 
 	self.packet_stasis = std.ArrayList(u8).init(allocator);
@@ -153,7 +146,7 @@ pub fn pollConnected(self: *@This()) !bool {
 	var poll_fds = std.mem.zeroes([1]std.os.pollfd);
 	poll_fds[0].fd = self.peer_connection.?.handle;
 	poll_fds[0].events = std.os.POLL.OUT;
-	var result: usize = std.os.poll(&poll_fds, 0) catch |err| blk: {
+	const result: usize = std.os.poll(&poll_fds, 0) catch |err| blk: {
 		if(err != error.WouldBlock) return err;
 		break :blk 0;
 	};
@@ -198,10 +191,10 @@ fn readLenFromStream(self: *@This(), len: usize) ![]u8 {
 		return self.packet_stasis.items[self.packet_stasis_offset-len..][0..len];
 	}
 	const lengthNeeded = self.packet_stasis_offset + len - self.packet_stasis.items.len;
-	if(!try bytesAvailable(self.peer_connection.?))
+	if(!try NetUtils.bytesAvailable(self.peer_connection.?.handle))
 		return PeerError.NonCompletePacket;
 	try self.packet_stasis.ensureUnusedCapacity(lengthNeeded);
-	var read_count = try self.peer_connection.?.read(self.packet_stasis.unusedCapacitySlice()[0..lengthNeeded]);
+	const read_count = try self.peer_connection.?.read(self.packet_stasis.unusedCapacitySlice()[0..lengthNeeded]);
 	if(read_count == 0) {
 		self.disconnect();
 		return PeerError.NotConnected;
@@ -229,7 +222,7 @@ pub fn processInteral(self: *@This()) !void {
 		if(!std.mem.eql(u8, infoHash, &self.infoHash))
 			return PeerError.MismatchedInfohash;
 		const peerid = try self.readLenFromStream(20);
-		_ = peerid; //Throw away peer id, not needed
+		self.remote_id = peerid[0..20].*;
 		self.processed_handshake = true;
 		try std.fmt.format(self.log.writer(), "> Handshake\n", .{});
 	} else {
@@ -239,7 +232,7 @@ pub fn processInteral(self: *@This()) !void {
 		}
 		//Read Packet Length
 		const packet_length_raw = try self.readLenFromStream(4);
-		const packet_length = std.mem.readIntBig(u32, packet_length_raw[0..4]);
+		const packet_length = std.mem.readInt(u32, packet_length_raw[0..4], .big);
 		if(packet_length == 0) {
 			try std.fmt.format(self.log.writer(), "> Alive\n", .{});
 			try self.alive();
@@ -259,7 +252,7 @@ pub fn processInteral(self: *@This()) !void {
 			},
 			.Have => {
 				try std.fmt.format(self.log.writer(), "> Have\n", .{});
-				var index = std.mem.readIntBig(u32, packet[1..5]);
+				const index = std.mem.readInt(u32, packet[1..5], .big);
 				const byteOffset = @divTrunc(index, 8);
 				const bitOffset: u3 = @intCast(7 - @mod(index, 8));
 				self.remote_pieces[byteOffset] |= @as(u8,1) << bitOffset;
@@ -276,9 +269,9 @@ pub fn processInteral(self: *@This()) !void {
 				std.mem.copyBackwards(u8, self.remote_pieces, packet[1..]);
 			},
 			.Request => {
-				var index = std.mem.readIntBig(u32, packet[1..5]);
-				var begin = std.mem.readIntBig(u32, packet[5..9]);
-				var length = std.mem.readIntBig(u32, packet[9..13]);
+				const index = std.mem.readInt(u32, packet[1..5], .big);
+				const begin = std.mem.readInt(u32, packet[5..9], .big);
+				const length = std.mem.readInt(u32, packet[9..13], .big);
 				if(length > 16384) return error.RequestPacketSizeTooLarge;
 
 				try self.requested_blocks.append(.{
@@ -290,9 +283,9 @@ pub fn processInteral(self: *@This()) !void {
 				try std.fmt.format(self.log.writer(), "> Request\n", .{});
 			},
 			.Piece => {
-				var index = std.mem.readIntBig(u32, packet[1..5]);
-				var begin = std.mem.readIntBig(u32, packet[5..9]);
-				var block = packet[9..];
+				const index = std.mem.readInt(u32, packet[1..5], .big);
+				const begin = std.mem.readInt(u32, packet[5..9], .big);
+				const block = packet[9..];
 				try self.received_blocks.append(.{
 					.allocator = self.allocator,
 					.piece_idx = index,
@@ -333,7 +326,7 @@ pub fn handshake(self: *@This()) !void {
 	sendBuf[0] = protocol.len;
 	std.mem.copyForwards(u8, sendBuf[1..], protocol);
 	std.mem.copyForwards(u8, sendBuf[(1 + 8 + protocol.len)..], &self.infoHash);
-	std.mem.copyForwards(u8, sendBuf[(1 + 8 + protocol.len + 20)..], &self.id);
+	std.mem.copyForwards(u8, sendBuf[(1 + 8 + protocol.len + 20)..], &self.self_id);
 	try self.peer_connection.?.writeAll(&sendBuf);
 	try std.fmt.format(self.log.writer(), "< Handshake [{s}]\n", .{std.fmt.fmtSliceHexLower(&sendBuf)});
 	self.keep_alive_time = std.time.milliTimestamp();
@@ -341,7 +334,7 @@ pub fn handshake(self: *@This()) !void {
 
 pub fn unchoke(self: *@This()) !void {
 	if(self.peer_connection == null) return PeerError.NotConnected;
-	var sendBuf = "\x00\x00\x00\x01\x01";
+	const sendBuf = "\x00\x00\x00\x01\x01";
 	try self.peer_connection.?.writeAll(sendBuf);
 	self.am_choking = false;
 	try std.fmt.format(self.log.writer(), "< Unchoke [{s}]\n", .{std.fmt.fmtSliceHexLower(sendBuf)});
@@ -350,7 +343,7 @@ pub fn unchoke(self: *@This()) !void {
 
 pub fn interested(self: *@This()) !void {
 	if(self.peer_connection == null) return PeerError.NotConnected;
-	var sendBuf = "\x00\x00\x00\x01\x02";
+	const sendBuf = "\x00\x00\x00\x01\x02";
 	try self.peer_connection.?.writeAll(sendBuf);
 	self.am_interested = true;
 	try std.fmt.format(self.log.writer(), "< Interested [{s}]\n", .{std.fmt.fmtSliceHexLower(sendBuf)});
@@ -360,9 +353,9 @@ pub fn interested(self: *@This()) !void {
 pub fn have(self: *@This(), index: u32) !void {
 	if(self.peer_connection == null) return PeerError.NotConnected;
 	var sendBuf = std.mem.zeroes([9]u8);
-	std.mem.writeIntBig(u32, sendBuf[0..4], 5); //packet length
-	std.mem.writeIntBig(u8, sendBuf[4..5], 4); //packet id
-	std.mem.writeIntBig(u32, sendBuf[5..9], index); //index
+	std.mem.writeInt(u32, sendBuf[0..4], 5, .big); //packet length
+	std.mem.writeInt(u8, sendBuf[4..5], 4, .big); //packet id
+	std.mem.writeInt(u32, sendBuf[5..9], index, .big); //index
 	try self.peer_connection.?.writeAll(&sendBuf);
 	try std.fmt.format(self.log.writer(), "< Have [{s}]\n", .{std.fmt.fmtSliceHexLower(&sendBuf)});
 	self.keep_alive_time = std.time.milliTimestamp();
@@ -370,12 +363,12 @@ pub fn have(self: *@This(), index: u32) !void {
 
 pub fn bitfield(self: *@This(), bitset: []u8) !void {
 	if(self.peer_connection == null) return PeerError.NotConnected;
-	var length: u32 = @intCast(bitset.len);
+	const length: u32 = @intCast(bitset.len);
 	var sendBuf = try self.allocator.alloc(u8, 5+length);
 	defer self.allocator.free(sendBuf);
-	std.mem.writeIntBig(u32, sendBuf[0..4], length+1);
-	std.mem.writeIntBig(u8, sendBuf[4..5], '\x05');
-	std.mem.copy(u8, sendBuf[5..], bitset);
+	std.mem.writeInt(u32, sendBuf[0..4], length+1, .big);
+	std.mem.writeInt(u8, sendBuf[4..5], '\x05', .big);
+	std.mem.copyForwards(u8, sendBuf[5..], bitset);
 	try self.peer_connection.?.writeAll(sendBuf);
 	try std.fmt.format(self.log.writer(), "< Bitfield [{s}]\n", .{std.fmt.fmtSliceHexLower(sendBuf)});
 	self.keep_alive_time = std.time.milliTimestamp();
@@ -383,7 +376,7 @@ pub fn bitfield(self: *@This(), bitset: []u8) !void {
 
 pub fn alive(self: *@This()) !void {
 	if(self.peer_connection == null) return PeerError.NotConnected;
-	var sendBuf = "\x00\x00\x00\x00";
+	const sendBuf = "\x00\x00\x00\x00";
 	try self.peer_connection.?.writeAll(sendBuf);
 	self.am_interested = true;
 	try std.fmt.format(self.log.writer(), "< Alive [{s}]\n", .{std.fmt.fmtSliceHexLower(sendBuf)});
@@ -393,11 +386,11 @@ pub fn alive(self: *@This()) !void {
 pub fn request(self: *@This(), index: u32, begin: u32, length: u32) !void {
 	if(self.peer_connection == null) return PeerError.NotConnected;
 	var sendBuf = std.mem.zeroes([17]u8);
-	std.mem.writeIntBig(u32, sendBuf[0..4], 13); //packet length
-	std.mem.writeIntBig(u8, sendBuf[4..5], 6); //packet id
-	std.mem.writeIntBig(u32, sendBuf[5..9], index); //index
-	std.mem.writeIntBig(u32, sendBuf[9..13], begin); //begin
-	std.mem.writeIntBig(u32, sendBuf[13..17], length); //length
+	std.mem.writeInt(u32, sendBuf[0..4], 13, .big); //packet length
+	std.mem.writeInt(u8, sendBuf[4..5], 6, .big); //packet id
+	std.mem.writeInt(u32, sendBuf[5..9], index, .big); //index
+	std.mem.writeInt(u32, sendBuf[9..13], begin, .big); //begin
+	std.mem.writeInt(u32, sendBuf[13..17], length, .big); //length
 	try self.peer_connection.?.writeAll(&sendBuf);
 	try std.fmt.format(self.log.writer(), "< Request [{s}]\n", .{std.fmt.fmtSliceHexLower(&sendBuf)});
 	self.keep_alive_time = std.time.milliTimestamp();
@@ -405,14 +398,14 @@ pub fn request(self: *@This(), index: u32, begin: u32, length: u32) !void {
 
 pub fn piece(self: *@This(), index: u32, begin: u32, data: []const u8) !void {
 	if(self.peer_connection == null) return PeerError.NotConnected;
-	var length: u32 = @intCast(data.len);
+	const length: u32 = @intCast(data.len);
 	var sendBuf = try self.allocator.alloc(u8, 13+length);
 	defer self.allocator.free(sendBuf);
-	std.mem.writeIntBig(u32, sendBuf[0..4], length+1);
-	std.mem.writeIntBig(u8, sendBuf[4..5], 7);
-	std.mem.writeIntBig(u32, sendBuf[5..9], index);
-	std.mem.writeIntBig(u32, sendBuf[9..13], begin);
-	std.mem.copy(u8, sendBuf[13..], data);
+	std.mem.writeInt(u32, sendBuf[0..4], length+1, .big);
+	std.mem.writeInt(u8, sendBuf[4..5], 7, .big);
+	std.mem.writeInt(u32, sendBuf[5..9], index, .big);
+	std.mem.writeInt(u32, sendBuf[9..13], begin, .big);
+	std.mem.copyForwards(u8, sendBuf[13..], data);
 	try self.peer_connection.?.writeAll(sendBuf);
 	try std.fmt.format(self.log.writer(), "< Piece [{s}]\n", .{std.fmt.fmtSliceHexLower(sendBuf)});
 	self.keep_alive_time = std.time.milliTimestamp();
@@ -421,11 +414,11 @@ pub fn piece(self: *@This(), index: u32, begin: u32, data: []const u8) !void {
 pub fn cancel(self: *@This(), index: u32, begin: u32, length: u32) !void {
 	if(self.peer_connection == null) return PeerError.NotConnected;
 	var sendBuf = std.mem.zeroes([17]u8);
-	std.mem.writeIntBig(u32, sendBuf[0..4], 13); //packet length
-	std.mem.writeIntBig(u8, sendBuf[4..5], 8); //packet id
-	std.mem.writeIntBig(u32, sendBuf[5..9], index); //index
-	std.mem.writeIntBig(u32, sendBuf[9..13], begin); //begin
-	std.mem.writeIntBig(u32, sendBuf[13..17], length); //length
+	std.mem.writeInt(u32, sendBuf[0..4], 13, .big); //packet length
+	std.mem.writeInt(u8, sendBuf[4..5], 8, .big); //packet id
+	std.mem.writeInt(u32, sendBuf[5..9], index, .big); //index
+	std.mem.writeInt(u32, sendBuf[9..13], begin, .big); //begin
+	std.mem.writeInt(u32, sendBuf[13..17], length, .big); //length
 	try self.peer_connection.?.writeAll(&sendBuf);
 	try std.fmt.format(self.log.writer(), "< Cancel [{s}]\n", .{std.fmt.fmtSliceHexLower(&sendBuf)});
 	self.keep_alive_time = std.time.milliTimestamp();

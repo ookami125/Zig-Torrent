@@ -39,20 +39,20 @@ pub fn getBTypeLength(bEncodeData: []const u8) !usize {
 }
 
 test "getBTypeLength" {
-    var data: []const u8 = "d1:ad1:bi32eee";
+    const data: []const u8 = "d1:ad1:bi32eee";
     try std.testing.expectEqual(getBTypeLength(data), 14);
 }
 
 pub fn GetInt(comptime T: type, bEncodeData: []const u8, readCount: ?*usize) !T {
     if (getBType(bEncodeData) != .Integer) return bError.NotInteger;
-    var idx = std.mem.indexOf(u8, bEncodeData, "e");
+    const idx = std.mem.indexOf(u8, bEncodeData, "e");
     if (idx == null) return bError.SyntaxError;
     if (readCount) |rc| rc.* += idx.? + 1;
     return try std.fmt.parseInt(T, bEncodeData[1..(idx.?)], 10);
 }
 
 test "getInt" {
-    var data: []const u8 = "i1337e";
+    const data: []const u8 = "i1337e";
     var readOffset: usize = 0;
     try std.testing.expectEqual(GetInt(i64, data, &readOffset), 1337);
     try std.testing.expectEqual(readOffset, 6);
@@ -74,13 +74,13 @@ fn GetInternalLength(bEncodeData: []const u8) !usize {
 
 pub fn GetList(bEncodeData: []const u8, readCount: ?*usize) ![]const u8 {
     if (getBType(bEncodeData) != .List) return bError.NotList;
-    var len: usize = try GetInternalLength(bEncodeData[1..]) + 1;
+    const len: usize = try GetInternalLength(bEncodeData[1..]) + 1;
     if (readCount) |rc| rc.* += len + 1;
     return bEncodeData[1..len];
 }
 
 test "getList" {
-    var data: []const u8 = "li1337ee";
+    const data: []const u8 = "li1337ee";
     var readOffset: usize = 0;
     try std.testing.expectEqualStrings(try GetList(data, &readOffset), "i1337e");
     try std.testing.expectEqual(readOffset, 8);
@@ -88,15 +88,15 @@ test "getList" {
 
 pub fn GetString(bEncodeData: []const u8, readCount: ?*usize) ![]const u8 {
     if (getBType(bEncodeData) != .String) return bError.NotString;
-    var idx = std.mem.indexOf(u8, bEncodeData, ":");
+    const idx = std.mem.indexOf(u8, bEncodeData, ":");
     if (idx == null) return bError.SyntaxError;
-    var strLen: usize = try std.fmt.parseInt(usize, bEncodeData[0..(idx.?)], 10);
+    const strLen: usize = try std.fmt.parseInt(usize, bEncodeData[0..(idx.?)], 10);
     if (readCount) |rc| rc.* += idx.? + 1 + strLen;
     return bEncodeData[(idx.? + 1)..(idx.? + 1 + strLen)];
 }
 
 test "GetString" {
-    var data: []const u8 = "12:Hello World!";
+    const data: []const u8 = "12:Hello World!";
     var readOffset: usize = 0;
     try std.testing.expectEqualStrings(try GetString(data, &readOffset), "Hello World!");
     try std.testing.expectEqual(readOffset, 15);
@@ -117,9 +117,9 @@ pub const DictIterator = struct {
     pub fn next(self: *Self) ?DictPair {
         if (self.buffer[self.index] == 'e') return null;
         return .{ .key = GetString(self.buffer[self.index..], &self.index) catch unreachable, .value = blk: {
-            var start = self.index;
-            var len = getBTypeLength(self.buffer[self.index..]) catch unreachable;
-            var end = start + len;
+            const start = self.index;
+            const len = getBTypeLength(self.buffer[self.index..]) catch unreachable;
+            const end = start + len;
             self.index += len;
             break :blk self.buffer[start..end];
         } };
@@ -133,7 +133,7 @@ pub const DictIterator = struct {
 
 pub fn GetDict(bEncodeData: []const u8, readCount: ?*usize) !DictIterator {
     if (getBType(bEncodeData) != .Dict) return bError.NotDict;
-    var len: usize = try GetInternalLength(bEncodeData[1..]) + 1;
+    const len: usize = try GetInternalLength(bEncodeData[1..]) + 1;
     if (readCount) |rc| rc.* += len + 1;
     return .{
         .buffer = bEncodeData[1..(1 + len)],

@@ -12,7 +12,7 @@ const Info = struct {
     buffer: []const u8,
     length: u64,
     name: []const u8,
-    pieceLength: u32,
+    pieceLength: u64,
     pieces: []const Hash,
     files: []FileInfo,
 };
@@ -49,8 +49,8 @@ pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !Torrent {
             var blist = try bencode.GetList(temp.value, null);
             var offset: usize = 0;
             while (offset < blist.len) {
-                var announceList2 = try bencode.GetList(blist[offset..], &offset);
-                var announce: []const u8 = try bencode.GetString(announceList2, null);
+                const announceList2 = try bencode.GetList(blist[offset..], &offset);
+                const announce: []const u8 = try bencode.GetString(announceList2, null);
 
                 try list.append(announce);
             }
@@ -73,8 +73,8 @@ pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !Torrent {
                 } else if (std.mem.eql(u8, infoPair.key, "piece length")) {
                     info.pieceLength = try bencode.GetInt(u32, infoPair.value, null);
                 } else if (std.mem.eql(u8, infoPair.key, "pieces")) {
-                    var allHashes = try bencode.GetString(infoPair.value, null);
-                    var bytes = std.mem.sliceAsBytes(allHashes);
+                    const allHashes = try bencode.GetString(infoPair.value, null);
+                    const bytes = std.mem.sliceAsBytes(allHashes);
                     info.pieces = std.mem.bytesAsSlice(Hash, bytes);
                 }
 				else if (std.mem.eql(u8, infoPair.key, "files")) {
@@ -96,7 +96,7 @@ pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !Torrent {
 								var flist = try bencode.GetList(filePair.value, null);
 								var flist_offset: usize = 0;
                     			while (flist_offset < flist.len) {
-                    				var file = try bencode.GetString(flist[flist_offset..], &flist_offset);
+                    				const file = try bencode.GetString(flist[flist_offset..], &flist_offset);
 									fileinfo.path = file;
                                 	//try list.append(file);
 								}

@@ -96,7 +96,7 @@ pub const CoroutineConnectTracker = struct {
 				std.debug.print("[{s}] Peers:\n", .{self.uri.host.?});
 				for(self.tracker.peers) |peer| {
 					std.debug.print("{}\n", .{peer});
-					try ctx.coroutineQueue.append(try Coroutine.create(ctx.allocator, 0, .coroutinePeerHandler, .{
+					try ctx.coroutineQueue.append(try Coroutine.create(ctx.allocator, .coroutinePeerHandler, .{
 						self.torrent,
 						self.torrent.file.infoHash,
 						std.net.Address.initIp4(peer.address, peer.port),

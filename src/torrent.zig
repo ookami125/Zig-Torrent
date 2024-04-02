@@ -1,7 +1,7 @@
 const std = @import("std");
-const Peer = @import("peer.zig");
+const Peer = @import("Peer.zig");
 const TorrentInfo = @import("torrentInfo.zig");
-pub const TBitfield = std.packed_int_array.PackedIntSliceEndian(u1, std.builtin.Endian.Big);
+pub const TBitfield = std.packed_int_array.PackedIntSliceEndian(u1, std.builtin.Endian.big);
 const RndGen = std.rand.DefaultPrng;
 const Torrent = @This();
 const RangeArray = @import("RangeArray.zig").RangeArray;
@@ -21,9 +21,9 @@ pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !Torrent {
     self.allocator = allocator;
     self.file = try TorrentInfo.loadFile(allocator, path);
 
-    var byteCount = TBitfield.bytesRequired(self.file.info.pieces.len);
+    const byteCount = TBitfield.bytesRequired(self.file.info.pieces.len);
 
-    var bitfieldBytes = try allocator.alloc(u8, byteCount);
+    const bitfieldBytes = try allocator.alloc(u8, byteCount);
     @memset(bitfieldBytes, 0);
     self.bitfield = TBitfield.init(bitfieldBytes, self.file.info.pieces.len);
 
@@ -31,8 +31,8 @@ pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !Torrent {
     //@memset(requestBitfieldBytes, 0);
     //self.requestBitfield = TBitfield.init(requestBitfieldBytes, self.file.info.pieces.len);
 
-	var name = std.fs.path.basename(path);
-	var dirname = try std.fmt.allocPrint(allocator, "downloads/{s}", .{name});
+	const name = std.fs.path.basename(path);
+	const dirname = try std.fmt.allocPrint(allocator, "downloads/{s}", .{name});
 	var outdir = std.fs.cwd().makeOpenPath(dirname, .{}) catch |err| blk: {
 		if(err != std.os.MakeDirError.PathAlreadyExists) return err;
 		break :blk try std.fs.cwd().openDir(dirname, .{});

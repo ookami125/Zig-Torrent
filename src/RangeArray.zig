@@ -39,7 +39,7 @@ pub fn RangeArray(comptime T: type) type {
 
 		fn ensureCapacity(self: *@This(), capacity: usize) !void {
 			if(capacity > self.capacity) {
-				var old_cap = self.ranges.len;
+				const old_cap = self.ranges.len;
 				self.capacity = capacity;
 				self.ranges = try self.allocator.realloc(self.ranges, self.capacity);
 				self.ranges.len = old_cap;
@@ -49,8 +49,8 @@ pub fn RangeArray(comptime T: type) type {
 		pub fn merge(array: *@This()) !void {
 			var i: usize = 0;
 			while(i < array.ranges.len - 1) {
-				var curr = array.ranges[i];
-				var next = array.ranges[i+1];
+				const curr = array.ranges[i];
+				const next = array.ranges[i+1];
 				if(curr.end == next.start) {
 					array.ranges[i].end = next.end;
 					if(i < array.ranges.len - 2) {
@@ -98,8 +98,8 @@ pub fn RangeArray(comptime T: type) type {
 
 		pub fn remove(arg_array: *@This(), arg_start: T, arg_end: T) !void {
 			var array = arg_array;
-			var start = arg_start;
-			var end = arg_end;
+			const start = arg_start;
+			const end = arg_end;
 			var i: usize = 0;
 			while ((i < array.ranges.len) and (end >= array.ranges[i].start)) {
 				if (start >= array.ranges[i].end) {
@@ -138,9 +138,9 @@ pub fn RangeArray(comptime T: type) type {
 		}
 
 		pub fn check(arg_array: *@This(), arg_start: T, arg_end: T) bool {
-			var array = arg_array;
-			var start = arg_start;
-			var end = arg_end;
+			const array = arg_array;
+			const start = arg_start;
+			const end = arg_end;
 			var i: usize = 0;
 			while ((i < array.ranges.len) and (end >= array.ranges[i].start)) {
 				if (start >= array.ranges[i].end) {
@@ -164,9 +164,9 @@ pub fn RangeArray(comptime T: type) type {
 		}
 
 		pub fn checkAll(arg_array: *@This(), arg_start: T, arg_end: T) bool {
-			var array = arg_array;
-			var start = arg_start;
-			var end = arg_end;
+			const array = arg_array;
+			const start = arg_start;
+			const end = arg_end;
 			var i: usize = 0;
 			while ((i < array.ranges.len) and (end >= array.ranges[i].start)) {
 				if (start >= array.ranges[i].end) {
@@ -185,7 +185,7 @@ pub fn RangeArray(comptime T: type) type {
 
 		pub fn split(arg_array: *@This(), arg_value: T) !void {
 			var array = arg_array;
-			var value = arg_value;
+			const value = arg_value;
 			var i: usize = 0;
 			while ((i < array.ranges.len) and !((value >= array.ranges[i].start) and (value <= array.ranges[i].end))) {
 				i += 1;
@@ -227,7 +227,7 @@ fn RandomIndex(rand: std.rand.Random, arr: anytype) @TypeOf(arr[0]) {
 }
 
 test "Remove front of range" {
-	var allocator = std.testing.allocator;
+	const allocator = std.testing.allocator;
 
 	const RangeArrayT = RangeArray(usize);
 	const RangeT = RangeArrayT.Range;
@@ -240,7 +240,7 @@ test "Remove front of range" {
 }
 
 test "Remove end of range" {
-	var allocator = std.testing.allocator;
+	const allocator = std.testing.allocator;
 
 	const RangeArrayT = RangeArray(usize);
 	const RangeT = RangeArrayT.Range;
@@ -253,7 +253,7 @@ test "Remove end of range" {
 }
 
 test "Remove full range" {
-	var allocator = std.testing.allocator;
+	const allocator = std.testing.allocator;
 
 	const RangeArrayT = RangeArray(usize);
 	const RangeT = RangeArrayT.Range;
@@ -266,7 +266,7 @@ test "Remove full range" {
 }
 
 test "Remove middle of range" {
-	var allocator = std.testing.allocator;
+	const allocator = std.testing.allocator;
 
 	const RangeArrayT = RangeArray(usize);
 	const RangeT = RangeArrayT.Range;
@@ -279,7 +279,7 @@ test "Remove middle of range" {
 }
 
 test "Add to front of range" {
-	var allocator = std.testing.allocator;
+	const allocator = std.testing.allocator;
 
 	const RangeArrayT = RangeArray(usize);
 	const RangeT = RangeArrayT.Range;
@@ -292,7 +292,7 @@ test "Add to front of range" {
 }
 
 test "Add touch front of range" {
-	var allocator = std.testing.allocator;
+	const allocator = std.testing.allocator;
 
 	const RangeArrayT = RangeArray(usize);
 	const RangeT = RangeArrayT.Range;
@@ -305,7 +305,7 @@ test "Add touch front of range" {
 }
 
 test "Add to back of range" {
-	var allocator = std.testing.allocator;
+	const allocator = std.testing.allocator;
 
 	const RangeArrayT = RangeArray(usize);
 	const RangeT = RangeArrayT.Range;
@@ -318,7 +318,7 @@ test "Add to back of range" {
 }
 
 test "Add touch back of range" {
-	var allocator = std.testing.allocator;
+	const allocator = std.testing.allocator;
 
 	const RangeArrayT = RangeArray(usize);
 	const RangeT = RangeArrayT.Range;
@@ -331,7 +331,7 @@ test "Add touch back of range" {
 }
 
 test "Add in range" {
-	var allocator = std.testing.allocator;
+	const allocator = std.testing.allocator;
 
 	const RangeArrayT = RangeArray(usize);
 	const RangeT = RangeArrayT.Range;
@@ -346,7 +346,7 @@ test "Add in range" {
 }
 
 test "Add out range" {
-	var allocator = std.testing.allocator;
+	const allocator = std.testing.allocator;
 
 	const RangeArrayT = RangeArray(usize);
 	const RangeT = RangeArrayT.Range;
@@ -358,7 +358,7 @@ test "Add out range" {
 }
 
 test "Slice out range" {
-	var allocator = std.testing.allocator;
+	const allocator = std.testing.allocator;
 
 	const RangeArrayT = RangeArray(usize);
 	const RangeT = RangeArrayT.Range;
@@ -371,7 +371,7 @@ test "Slice out range" {
 }
 
 test "Slice front of range" {
-	var allocator = std.testing.allocator;
+	const allocator = std.testing.allocator;
 
 	const RangeArrayT = RangeArray(usize);
 	const RangeT = RangeArrayT.Range;
@@ -383,7 +383,7 @@ test "Slice front of range" {
 }
 
 test "Slice back of range" {
-	var allocator = std.testing.allocator;
+	const allocator = std.testing.allocator;
 
 	const RangeArrayT = RangeArray(usize);
 	const RangeT = RangeArrayT.Range;
@@ -396,7 +396,7 @@ test "Slice back of range" {
 
 
 test "Slice middle of range" {
-	var allocator = std.testing.allocator;
+	const allocator = std.testing.allocator;
 
 	const RangeArrayT = RangeArray(usize);
 	const RangeT = RangeArrayT.Range;
@@ -409,7 +409,7 @@ test "Slice middle of range" {
 
 test "Add inbetween" {
 	//Yes this was broken at one point
-	var allocator = std.testing.allocator;
+	const allocator = std.testing.allocator;
 
 	const RangeArrayT = RangeArray(usize);
 	const RangeT = RangeArrayT.Range;
@@ -429,7 +429,7 @@ test "Add inbetween" {
 }
 
 test "Merge Test" {
-	var allocator = std.testing.allocator;
+	const allocator = std.testing.allocator;
 
 	const RangeArrayT = RangeArray(usize);
 	const RangeT = RangeArrayT.Range;
@@ -445,7 +445,7 @@ test "Merge Test" {
 }
 
 // test "Downloaded Blocks" {
-// 	var allocator = std.testing.allocator;
+// 	const allocator = std.testing.allocator;
 
 // 	var prng = std.rand.DefaultPrng.init(blk: {
 // 		var longSeed: u128 = @intCast(std.time.nanoTimestamp());

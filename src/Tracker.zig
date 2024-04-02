@@ -1,5 +1,7 @@
 const std = @import("std");
 const net = @import("network.zig");
+const NetUtils = @import("NetUtils.zig");
+
 pub const InfoHash = [20]u8;
 pub const Peer = struct {
 	address: [4]u8,
@@ -69,28 +71,19 @@ fn getPort(uri: std.Uri) u16 {
     };
 }
 
-pub fn bytesAvailable(stream: net.Socket) !bool {
-	var poll_fd = std.mem.zeroes([1]std.os.pollfd);
-	poll_fd[0].fd = stream.internal;
-	poll_fd[0].events = 1;
-	var ready = try std.os.poll(&poll_fd, 0);
-	if(ready == 0) return false;
-	return (poll_fd[0].revents & 0x9 != 0x0);
-}
-
 pub fn processInteral(self: *@This()) !void {
 	if(self.connection == null) return;
-	if(!try bytesAvailable(self.connection.?)) return;
+	if(!try NetUtils.bytesAvailable(self.connection.?.internal)) return;
 	
 	const recvFrom = try self.connection.?.receiveFrom(self.packet_stasis);
 	const count = recvFrom.numberOfBytes;
 
 	std.debug.print("> RAW: [{}]\n", .{std.fmt.fmtSliceHexLower(self.packet_stasis[0..count])});
 	
-	const action: ActionID = @enumFromInt(std.mem.readIntBig(u32, self.packet_stasis[0..][0..4]));
-	const transaction_id = std.mem.readIntBig(u32, self.packet_stasis[4..][0..4]);
+	const action: ActionID = @enumFromInt(std.mem.readInt(u32, self.packet_stasis[0..][0..4], .big));
+	const transaction_id = std.mem.readInt(u32, self.packet_stasis[4..][0..4], .big);
 	if(!self.connected) {
-		const connection_id = std.mem.readIntBig(u64, self.packet_stasis[8..][0..8]);
+		const connection_id = std.mem.readInt(u64, self.packet_stasis[8..][0..8], .big);
 		if(action != .Connect) return error.InvalidPacket;
 		if(transaction_id != self.transaction_id) return error.InvalidPacket;
 		self.connection_id = connection_id;
@@ -104,16 +97,16 @@ pub fn processInteral(self: *@This()) !void {
 		ActionID.Announce => {
 			if(count <= 20) return error.InvalidPacket;
 			if((count - 20) % 6 != 0) return error.InvalidPacket;
-			const interval = std.mem.readIntBig(u32, self.packet_stasis[8..][0..4]);
+			const interval = std.mem.readInt(u32, self.packet_stasis[8..][0..4], .big);
 			_ = interval;
-			const leechers = std.mem.readIntBig(u32, self.packet_stasis[12..][0..4]);
+			const leechers = std.mem.readInt(u32, self.packet_stasis[12..][0..4], .big);
 			_ = leechers;
-			const seeders = std.mem.readIntBig(u32, self.packet_stasis[16..][0..4]);
+			const seeders = std.mem.readInt(u32, self.packet_stasis[16..][0..4], .big);
 			_ = seeders;
 			self.peers = try self.allocator.realloc(self.peers, (count - 20) / 6);
 			for(0..((count - 20) / 6)) |i| {
-				const address = std.mem.readIntLittle(u32, self.packet_stasis[i*6+20..][0..4]);
-				const port = std.mem.readIntBig(u16, self.packet_stasis[i*6+24..][0..2]);
+				const address = std.mem.readInt(u32, self.packet_stasis[i*6+20..][0..4], .little);
+				const port = std.mem.readInt(u16, self.packet_stasis[i*6+24..][0..2], .big);
 				const addressBytes = std.mem.asBytes(&address);
 				std.mem.copyForwards(u8, &self.peers[i].address, addressBytes);
 				self.peers[i].port = port;
@@ -144,11 +137,11 @@ pub fn connect(self: *@This(), uri: std.Uri) !void {
 	switch(self.connection_type) {
 		.UDP => {
 			var sendBuf = std.mem.zeroes([16]u8);
-			std.mem.writeIntBig(u64, sendBuf[0..][0..8], self.connection_id);
-			std.mem.writeIntBig(u32, sendBuf[8..][0..4], @intFromEnum(ActionID.Connect));
-			std.mem.writeIntBig(u32, sendBuf[12..][0..4], self.transaction_id);
+			std.mem.writeInt(u64, sendBuf[0..][0..8], self.connection_id, .big);
+			std.mem.writeInt(u32, sendBuf[8..][0..4], @intFromEnum(ActionID.Connect), .big);
+			std.mem.writeInt(u32, sendBuf[12..][0..4], self.transaction_id, .big);
 			
-			var sentLen = try self.connection.?.sendTo(self.endpoint, &sendBuf);
+			const sentLen = try self.connection.?.sendTo(self.endpoint, &sendBuf);
 			if(sentLen != sendBuf.len) return error.FailedToSendPacket;
 			std.log.debug("< Connect [{s}]", .{std.fmt.fmtSliceHexLower(&sendBuf)});
 		},
@@ -174,21 +167,21 @@ pub fn announce(self: *@This(), infohash: [20]u8, peer_id: [20]u8, downloaded: u
 			self.transaction_id += 1;
 
 			var sendBuf = std.mem.zeroes([98]u8);
-			std.mem.writeIntBig(u64, sendBuf[ 0..][0..@sizeOf(u64)], self.connection_id);
-			std.mem.writeIntBig(u32, sendBuf[ 8..][0..@sizeOf(u32)], @intFromEnum(ActionID.Announce));
-			std.mem.writeIntBig(u32, sendBuf[12..][0..@sizeOf(u32)], self.transaction_id);
+			std.mem.writeInt(u64, sendBuf[ 0..][0..@sizeOf(u64)], self.connection_id, .big);
+			std.mem.writeInt(u32, sendBuf[ 8..][0..@sizeOf(u32)], @intFromEnum(ActionID.Announce), .big);
+			std.mem.writeInt(u32, sendBuf[12..][0..@sizeOf(u32)], self.transaction_id, .big);
 			std.mem.copyForwards(u8, sendBuf[16..][0..20], &infohash);
 			std.mem.copyForwards(u8, sendBuf[36..][0..20], &peer_id);
-			std.mem.writeIntBig(u64, sendBuf[56..][0..@sizeOf(u64)], downloaded);
-			std.mem.writeIntBig(u64, sendBuf[64..][0..@sizeOf(u64)], left);
-			std.mem.writeIntBig(u64, sendBuf[72..][0..@sizeOf(u64)], uploaded);
-			std.mem.writeIntBig(u32, sendBuf[80..][0..@sizeOf(u32)], @intFromEnum(coroutine));
-			std.mem.writeIntBig(u32, sendBuf[84..][0..@sizeOf(u32)], ip_address);
-			std.mem.writeIntBig(u32, sendBuf[88..][0..@sizeOf(u32)], key);
-			std.mem.writeIntBig(u32, sendBuf[92..][0..@sizeOf(u32)], num_want);
-			std.mem.writeIntBig(u16, sendBuf[96..][0..@sizeOf(u16)], port);
+			std.mem.writeInt(u64, sendBuf[56..][0..@sizeOf(u64)], downloaded, .big);
+			std.mem.writeInt(u64, sendBuf[64..][0..@sizeOf(u64)], left, .big);
+			std.mem.writeInt(u64, sendBuf[72..][0..@sizeOf(u64)], uploaded, .big);
+			std.mem.writeInt(u32, sendBuf[80..][0..@sizeOf(u32)], @intFromEnum(coroutine), .big);
+			std.mem.writeInt(u32, sendBuf[84..][0..@sizeOf(u32)], ip_address, .big);
+			std.mem.writeInt(u32, sendBuf[88..][0..@sizeOf(u32)], key, .big);
+			std.mem.writeInt(u32, sendBuf[92..][0..@sizeOf(u32)], num_want, .big);
+			std.mem.writeInt(u16, sendBuf[96..][0..@sizeOf(u16)], port, .big);
 
-			var sentLen = try self.connection.?.sendTo(self.endpoint, &sendBuf);
+			const sentLen = try self.connection.?.sendTo(self.endpoint, &sendBuf);
 			if(sentLen != sendBuf.len) return error.FailedToSendPacket;
 			std.log.debug("< Announce [{s}]", .{std.fmt.fmtSliceHexLower(&sendBuf)});
 		},
