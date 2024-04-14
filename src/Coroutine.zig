@@ -6,7 +6,7 @@ const Peer = @import("Peer.zig");
 pub const CoroutineLogger = @import("coroutines/CoroutineLogger.zig").CoroutineLogger;
 pub const CoroutinePeerHandler = @import("coroutines/CoroutinePeerHandler.zig").CoroutinePeerHandler;
 pub const CoroutineConnectTracker = @import("coroutines/CoroutineConnectTracker.zig").CoroutineConnectTracker;
-pub const CoroutineLoadTorrent = @import("coroutines/CoroutineLoadTorrent.zig").CoroutineLoadTorrent;
+pub const CoroutineTorrentHandler = @import("coroutines/CoroutineTorrentHandler.zig").CoroutineTorrentHandler;
 pub const CoroutineWebsocket = @import("coroutines/CoroutineWebsocket.zig").CoroutineWebsocket;
 pub const CoroutineWebserver = @import("coroutines/CoroutineWebserver.zig").CoroutineWebserver;
 pub const CoroutineWebclient = @import("coroutines/CoroutineWebclient.zig").CoroutineWebclient;
@@ -15,7 +15,7 @@ pub const Coroutine = @This();
 
 pub const CoroutineType = enum {
 	coroutineLogger,
-	coroutineLoadTorrent,
+	coroutineTorrentHandler,
 	coroutineConnectTracker,
 	coroutinePeerHandler,
 	coroutineWebclient,
@@ -25,7 +25,7 @@ pub const CoroutineType = enum {
 
 pub const CoroutineData = union(CoroutineType) {
 	coroutineLogger: CoroutineLogger,
-	coroutineLoadTorrent: CoroutineLoadTorrent,
+	coroutineTorrentHandler: CoroutineTorrentHandler,
 	coroutineConnectTracker: CoroutineConnectTracker,
 	coroutinePeerHandler: CoroutinePeerHandler,
 	coroutineWebclient: CoroutineWebclient,
@@ -40,31 +40,48 @@ pub const EventType = enum {
 	eventTorrentAdded,
 	eventPeerConnected,
 	eventPeerDisconnected,
-	eventRequestPeersConnected,
+	eventRequestGlobalState,
 	eventPeerStateChange,
 	eventPeerHave,
+	eventBlockReceived,
+	eventRequestReadBlock,
 };
 
 pub const EventData = union(EventType) {
-	eventTorrentAdded: struct{},
+	eventTorrentAdded: struct {
+		hash: [20]u8,
+		pieces: u64,
+		completed: u64,
+	},
 	eventPeerConnected: struct {
 		peerId: [20]u8,
 	},
 	eventPeerDisconnected: struct {
 		peerId: [20]u8,
 	},
-	eventRequestPeersConnected: struct {},
+	eventRequestGlobalState: struct {},
 	eventPeerStateChange: struct {
 		peerId: [20]u8,
-		am_choking: bool,
-		am_interested: bool,
-		remote_choking: bool,
-		remote_interested: bool,
+		state: u32,
+		pieceCount: u64,
 	},
 	eventPeerHave: struct {
 		peerId: [20]u8,
 		have: u64,
 	},
+	eventBlockReceived: struct {
+		hash: [20]u8,
+		pieceIdx: u64,
+		blockOffset: u64,
+		data: []const u8,
+	},
+	eventRequestReadBlock: struct {
+		hash: [20]u8,
+		pieceIdx: u64,
+		blockOffset: u64,
+		data: []u8,
+		failed: *bool,
+	}
 };
 
 pub const EventBitfield = std.EnumSet(EventType);

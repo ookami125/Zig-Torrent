@@ -41,7 +41,7 @@ pub const CoroutineWebserver = struct {
 					std.debug.print("Found web client...\n", .{});
 					const client = try self.server.?.accept(.{ .allocator = ctx.allocator, });
 					std.debug.print("Accepted web client...\n", .{});
-					try ctx.coroutineQueue.append(try Coroutine.create(ctx.allocator, .coroutineWebclient, .{
+					try ctx.addCoroutine(try Coroutine.create(ctx.allocator, .coroutineWebclient, .{
 						client
 					}));
 					std.debug.print("Appended web client...\n", .{});

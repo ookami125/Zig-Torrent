@@ -259,12 +259,6 @@ pub fn processInteral(self: *@This()) !void {
 			},
 			.Bitfield => {
 				try std.fmt.format(self.log.writer(), "> Bitfield\n", .{});
-				const bitfield_byte_count = packet_length-1;
-				const bitfield_bit_count = bitfield_byte_count*8;
-				_ = bitfield_bit_count;
-				//try self.remote_pieces.resize(bitfield_bit_count, false);
-
-				//self.remote_pieces = try self.allocator.alloc(u8, bitfield_byte_count);
 				@memset(self.remote_pieces, 0);
 				std.mem.copyBackwards(u8, self.remote_pieces, packet[1..]);
 			},

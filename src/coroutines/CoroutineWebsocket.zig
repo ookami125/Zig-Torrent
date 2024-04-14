@@ -4,45 +4,71 @@ const CoroutineContext = Coroutine.CoroutineContext;
 const NetUtils = @import("../NetUtils.zig");
 const WS = @import("../Websocket.zig");
 const WebSocket = WS.WebSocket;
-const json = @import("../json.zig");
+const Bencode = @import("../bencode.zig");
 const EventBitfield = Coroutine.EventBitfield;
 const EventType = Coroutine.EventType;
 
+const MsgFilename = struct {
+	filename: []const u8,
+};
+
 fn on_msg(msg: []const u8, ws: *WebSocket) void {
     std.log.debug("msg: ({}) {s}", .{ msg.len, msg });
-    ws.send(msg) catch unreachable;
+	_ = ws;
 }
+
+const Packet = struct {
+	packetType: u32,
+	packetData: []const u8,
+};
+
+const UploadedFile = struct {
+	filename: []const u8,
+	contents: []const u8,
+};
 
 fn on_binary(msg: []const u8, ws: *WebSocket) void {
-	const websocket = @fieldParentPtr(CoroutineWebsocket, "ws", ws);
-	const allocator = websocket.uploaded_files.allocator;
-	const dupe_msg = allocator.dupe(u8, msg) catch return;
-	errdefer allocator.free(dupe_msg);
-	websocket.uploaded_files.append(dupe_msg) catch return;
+	var packet: Packet = undefined;
+	var packetRaw = Bencode.GetDict(msg, null) catch return;
+	while(packetRaw.next()) |pair| {
+		if(std.mem.eql(u8, pair.key, "packetType")) {
+			packet.packetType = Bencode.GetInt(u32, pair.value, null) catch return;
+			continue;
+		}
+		if(std.mem.eql(u8, pair.key, "packetData")) {
+			packet.packetData = pair.value;
+			continue;
+		}
+	}
+	handlePacket(&packet, ws) catch return;
 }
 
-pub const UITracker = struct {
-	url: []const u8,
-};
-
-pub const UIPeer = struct {
-	peerName: []const u8,
-	peerIp: []const u8,
-};
-
-pub const UITorrent = struct {
-	trackers: []UITracker,
-};
-
-pub const UIData = struct {
-	torrents: []UITorrent,
-};
+fn handlePacket(packet: *Packet, ws: *WebSocket) !void {
+	const websocket = @fieldParentPtr(CoroutineWebsocket, "ws", ws);
+	const allocator = websocket.uploaded_files.allocator;
+	switch(packet.packetType) {
+		5 => {
+			var file: UploadedFile = undefined;
+			var packetData = try Bencode.GetDict(packet.packetData, null);
+			while(packetData.next()) |pair| {
+				if(std.mem.eql(u8, pair.key, "filename")) {
+					file.filename = try allocator.dupe(u8, try Bencode.GetString(pair.value, null));
+				}
+				if(std.mem.eql(u8, pair.key, "contents")) {
+					file.contents = try allocator.dupe(u8, try Bencode.GetString(pair.value, null));
+				}
+			}
+			try websocket.uploaded_files.append(file);
+		},
+		else => {},
+	}
+}
 
 pub const CoroutineWebsocket = struct {
 	state: States,
 	response: std.http.Server.Response,
 	ws: WebSocket,
-	uploaded_files: std.ArrayList([]const u8),
+	uploaded_files: std.ArrayList(UploadedFile),
 
 	const States = enum {
 		Unstarted,
@@ -97,6 +123,7 @@ pub const CoroutineWebsocket = struct {
 				self.state = .Active;
 
 				ctx.subscribe(EventBitfield.initMany(&[_]EventType{
+					.eventTorrentAdded,
 					.eventPeerConnected,
 					.eventPeerHave,
 					.eventPeerStateChange,
@@ -105,7 +132,7 @@ pub const CoroutineWebsocket = struct {
 				.coroutineWebsocket,
 				self);
 
-				ctx.publish(.{ .eventRequestPeersConnected = undefined });
+				ctx.publish(.{ .eventRequestGlobalState = undefined });
 			},
 			.Active => {
 				while(try NetUtils.bytesAvailable(self.ws.stream.handle)) {
@@ -116,13 +143,9 @@ pub const CoroutineWebsocket = struct {
 				}
 				if(self.uploaded_files.items.len > 0) {
 					const file = self.uploaded_files.orderedRemove(0);
-					defer ctx.allocator.free(file);
-					const tempfile = try std.fs.cwd().createFile("temp.torrent", .{});
-					_ = try tempfile.write(file);
-					const path = try std.fs.cwd().realpathAlloc(ctx.allocator, "./temp.torrent");
-					//defer ctx.allocator.free(path);
-					try ctx.coroutineQueue.append(try Coroutine.create(ctx.allocator, .coroutineLoadTorrent, .{
-						path
+					try ctx.addCoroutine(try Coroutine.create(ctx.allocator, .coroutineTorrentHandler, .{
+						file.filename,
+						file.contents
 					}));
 				}
 			},

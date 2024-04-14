@@ -7,15 +7,9 @@ const CoroutineContext = Coroutine.CoroutineContext;
 const EventBitfield = Coroutine.EventBitfield;
 const EventType = Coroutine.EventType;
 
-fn pieceCheck(data: []const u8, pieceHash: Torrent.Hash) bool {
-	var buff: Torrent.Hash = undefined;
-	std.crypto.hash.Sha1.hash(data, &buff, .{});
-	return std.mem.eql(u8, &pieceHash, &buff);
-}
-
 fn popCountArray(data: []const u8) u64 {
 	var count: u64 = 0;
-	for(data.items) |elem| {
+	for(data) |elem| {
 		count += @popCount(elem);
 	}
 	return count;
@@ -32,7 +26,7 @@ pub const CoroutinePeerHandler = struct {
 	focusPiece: ?u32,
 	prng: std.rand.DefaultPrng,
 	bitfield: Torrent.TBitfield,
-	lastPieceCount: u32,
+	lastPieceCount: u64,
 
 	const ReqBlocks = struct {
 		time: i64,
@@ -104,11 +98,17 @@ pub const CoroutinePeerHandler = struct {
 
 	pub fn message(self: *@This(), ctx: *CoroutineContext, eventData: Coroutine.EventData) void {
 		switch (eventData) {
-			.eventRequestPeersConnected => ctx.publish(.{
-					.eventPeerConnected = .{
-						.peerId = self.peer.remote_id,
-					},
-				}),
+			.eventRequestGlobalState => {
+				if(self.peer.processed_handshake) {
+					ctx.publish(.{
+						.eventPeerStateChange = .{
+							.peerId = self.peer.remote_id,
+							.state = @intFromEnum(self.state),
+							.pieceCount = self.lastPieceCount,
+						}
+					});
+				}
+			},
 			inline else => {},
 			//else => {},
 		}
@@ -136,7 +136,7 @@ pub const CoroutinePeerHandler = struct {
 				};
 
 				ctx.subscribe(EventBitfield.initMany(&[_]EventType{
-					.eventRequestPeersConnected,
+					.eventRequestGlobalState,
 				}),
 				.coroutinePeerHandler,
 				self);
@@ -177,6 +177,13 @@ pub const CoroutinePeerHandler = struct {
 						},
 					});
 					self.state = .Connected;
+					ctx.publish(.{
+						.eventPeerStateChange = .{
+							.peerId = self.peer.remote_id,
+							.state = @intFromEnum(self.state),
+							.pieceCount = self.lastPieceCount,
+						}
+					});
 				}
 			},
 			.Connected => {
@@ -192,29 +199,32 @@ pub const CoroutinePeerHandler = struct {
 				}
 
 				{
-					var count: u32 = 0;
-					for(self.peer.remote_pieces) |piece| {
-						count += @popCount(piece);
-					}
+					const count: u64 = popCountArray(self.peer.remote_pieces);
 					if(count > self.lastPieceCount) {
-						// ctx.publish(.{
-						// 	.eventPeerUpdated = self,
-						// });
 						self.lastPieceCount = count;
+						ctx.publish(.{
+							.eventPeerStateChange = .{
+								.peerId = self.peer.remote_id,
+								.state = @intFromEnum(self.state),
+								.pieceCount = self.lastPieceCount,
+							}
+						});
 					}
 				}
 
 				if(!self.peer.peer_choking) {
 					if(self.peer.received_blocks.items.len > 0) {
-						var file = self.torrent.outfile;//try std.fs.cwd().createFile("output.bin", .{.read = true, .truncate = false});
-						//defer file.close();
-
 						try std.fmt.format(self.log.writer(),"Recieved Blocks: {}\n", .{self.peer.received_blocks.items.len});
 						while(self.peer.received_blocks.popOrNull()) |block| {
-							
 							const offsetStart = block.piece_idx * self.torrent.file.info.pieceLength + block.piece_offset;
-							try file.seekTo(offsetStart);
-							try file.writeAll(block.data);
+							ctx.publish(.{
+								.eventBlockReceived = .{
+									.hash = self.torrent.file.infoHash,
+									.pieceIdx = block.piece_idx,
+									.blockOffset = block.piece_offset,
+									.data = block.data,
+								}
+							});
 
 							try self.torrent.downloaded.add(offsetStart, offsetStart + block.data.len);
 							try self.torrent.downloaded.merge();
@@ -230,16 +240,28 @@ pub const CoroutinePeerHandler = struct {
 
 							const pieceLen = self.torrent.file.info.pieceLength;
 							const downloadOffset = block.piece_idx * pieceLen;
-							const downloadOffsetEnd = (block.piece_idx+1) * pieceLen;
+							const downloadOffsetEnd = @min((block.piece_idx+1) * pieceLen, self.torrent.file.info.length);
+							const actualPieceLength = downloadOffsetEnd - downloadOffset;
 							if(self.torrent.downloaded.checkAll(downloadOffset, downloadOffsetEnd)) {
-								const temp = try ctx.allocator.alloc(u8, pieceLen);
+								const temp = try ctx.allocator.alloc(u8, actualPieceLength);
 								defer ctx.allocator.free(temp);
-								try self.torrent.outfile.seekTo(downloadOffset);
-								_ = try self.torrent.outfile.read(temp);
-								if(pieceCheck(temp, self.torrent.file.info.pieces[block.piece_idx])) {
+								var failed: bool = false;
+								failed = failed;
+								ctx.publish(.{
+									.eventRequestReadBlock = .{
+										.hash = self.torrent.file.infoHash,
+										.pieceIdx = block.piece_idx,
+										.blockOffset = 0,
+										.data = temp,
+										.failed = &failed,
+									}
+								});
+								if(!failed and Torrent.pieceCheck(block.piece_idx, temp[0..actualPieceLength], self.torrent.file.info.pieces[block.piece_idx])) {
 									self.torrent.bitfield.set(block.piece_idx, 1);
 								} else {
 									std.debug.print("({}) PIECE CHECK FAILED!\n", .{block.piece_idx});
+									try self.torrent.downloaded.remove(downloadOffset, downloadOffsetEnd);
+									try self.torrent.notDownloaded.add(downloadOffset, downloadOffsetEnd);
 								}
 							}
 						}
@@ -364,7 +386,23 @@ pub const CoroutinePeerHandler = struct {
 					for(self.peer.requested_blocks.items) |block| {
 						block_temp = try ctx.allocator.realloc(block_temp, block.piece_length);
 						try self.torrent.outfile.seekTo(block.piece_idx * self.torrent.file.info.pieceLength + block.piece_offset);
-						_ = try self.torrent.outfile.read(block_temp);
+						//const len = try self.torrent.outfile.read(block_temp);
+						//if(len < self.torrent.file.info.pieceLength) {
+						//	continue;
+						//}
+						var failed: bool = false;
+						ctx.publish(.{
+							.eventRequestReadBlock = .{
+								.hash = self.torrent.file.infoHash,
+								.pieceIdx = block.piece_idx,
+								.blockOffset = block.piece_offset,
+								.data = block_temp,
+								.failed = &failed,
+							}
+						});
+						
+						if(failed) continue;
+
 						try self.peer.piece(block.piece_idx, block.piece_offset, block_temp);
 					}
 				}
@@ -377,12 +415,18 @@ pub const CoroutinePeerHandler = struct {
 					if(sum == self.torrent.getSize()) {
 						try std.fmt.format(self.log.writer(),"Moving onto Done ({}, {})\n", .{self.reqs.items.len, self.torrent.notDownloaded.ranges.len});
 						self.state = .Done;
+						ctx.publish(.{
+							.eventPeerStateChange = .{
+								.peerId = self.peer.remote_id,
+								.state = @intFromEnum(self.state),
+								.pieceCount = self.lastPieceCount,
+							}
+						});
 					}
 				}
 			},
 			.Done => {
 				try std.fmt.format(self.log.writer(),"!Done\n", .{});
-				try self.torrent.outfile.sync();
 				ctx.publish(.{
 					.eventPeerDisconnected = .{
 						.peerId = self.peer.remote_id,

@@ -10,9 +10,41 @@ let connectButton;
 let uploadButton;
 let uploadFile;
 
-let root = {
-	peers: {},
-};
+let root = {};
+
+function resetRoot() {
+	root = {
+		torrents: {},
+		peers: {},
+	};
+	let rootUI = $('#root')[0];
+	if(rootUI !== undefined) {
+		rootUI.innerText = JSON.stringify(root, null, 2);
+	}
+}
+resetRoot();
+
+function concat(arrays) {
+	// sum of individual array lengths
+	let totalLength = arrays.reduce((acc, value) => acc + value.length, 0);
+
+	if (!arrays.length) return null;
+
+	let result = new Uint8Array(totalLength);
+
+	// for each array - copy it over result
+	// next array is copied right after the previous one
+	let length = 0;
+	for (let array of arrays) {
+		if(typeof array === 'string' || array instanceof String) {
+			array = Uint8Array.from(Array.from(array).map(letter => letter.charCodeAt(0)));
+		}
+		result.set(array, length);
+		length += array.length;
+	}
+
+	return result;
+}
 
 function setup() {
     incomingSpan = document.getElementById('incoming');
@@ -25,7 +57,18 @@ function setup() {
 	uploadButton.onclick = async function() {
 		let file = uploadFile.files[0];
 		let byteFile = await getAsByteArray(file);
-		socket.send(byteFile);
+		//socket.send("{\"filename\":\""+file.name+"\"}");
+		let msg = concat([
+			"d",
+			"10:packetTypei"+FILE_UPLOAD+"e",
+			"10:packetDatad",
+			"8:filename" + file.name.length + ":" + file.name,
+			"8:contents" + byteFile.length + ":",
+			byteFile,
+			"ee"
+		]);
+		socket.send(msg);
+		uploadFile.value = null;
 	}
 
     outgoingText.addEventListener('change', sendMessage);
@@ -66,6 +109,7 @@ function changeConnection(event) {
 function openConnection() {
     connectionSpan.innerHTML = "true";
     connectButton.value = "Disconnect";
+	resetRoot();
 }
 
 function closeConnection() {
@@ -78,6 +122,7 @@ const PEER_CONNECTED = 1;
 const PEER_DISCONNECTED = 2;
 const PEER_STATE_CHANGED = 3;
 const PEER_HAVE = 4;
+const FILE_UPLOAD = 5;
 
 function bitCount (n) {
 	n = n - ((n >> 1) & 0x55555555)
@@ -99,14 +144,17 @@ function readIncomingMessage(event_raw) {
 
     ev = JSON.parse(event_raw.data);
 	switch(ev.id) {
-		//case TORRENT_ADDED: {
-		//	addTorrent(ev.data, "#TORRENT CONTENT#");
-		//} break;
+		case TORRENT_ADDED: {
+			addTorrent(ev.data);
+		} break;
 		case PEER_CONNECTED: {
 			addPeer(ev.data);
 		} break;
 		case PEER_DISCONNECTED: {
 			removePeer(ev.data);
+		} break;
+		case PEER_HAVE: {
+			addPeer(ev.data);
 		} break;
 		//case PEER_UPDATED: {
 		//	var piece_count = bitCountArray(ev.peer.remote_pieces);
@@ -161,7 +209,40 @@ myLayout.registerComponent('root', function (container, state) {
 
 myLayout.init();
 
+function bytesArrToBase64(arr) {
+	const abc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"; // base64 alphabet
+	const bin = n => n.toString(2).padStart(8,0); // convert num to 8-bit binary string
+	const l = arr.length
+	let result = '';
+  
+	for(let i=0; i<=(l-1)/3; i++) {
+	  let c1 = i*3+1>=l; // case when "=" is on end
+	  let c2 = i*3+2>=l; // case when "=" is on end
+	  let chunk = bin(arr[3*i]) + bin(c1? 0:arr[3*i+1]) + bin(c2? 0:arr[3*i+2]);
+	  let r = chunk.match(/.{1,6}/g).map((x,j)=> j==3&&c2 ? '=' :(j==2&&c1 ? '=':abc[+('0b'+x)]));  
+	  result += r.join('');
+	}
+  
+	return result;
+}
+
+function toHexString(byteArray) {
+	return Array.from(byteArray, function(byte) {
+		return ('0' + (byte & 0xFF).toString(16)).slice(-2);
+	}).join('')
+}  
+
+var addTorrent = function (data) {
+	data.hash = toHexString(data.hash);
+	root.torrents[data.hash] = data;
+	$('#root')[0].innerText = JSON.stringify(root, null, 2);
+};
+
 var addPeer = function (data) {
+	if(!(typeof data.peerId === 'string' || data.peerId instanceof String))
+	{
+		data.peerId = "b64@" + bytesArrToBase64(data.peerId);
+	}
 	root.peers[data.peerId] = data;
 	$('#root')[0].innerText = JSON.stringify(root, null, 2);
 };

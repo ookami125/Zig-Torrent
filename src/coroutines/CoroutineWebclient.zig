@@ -119,7 +119,7 @@ pub const CoroutineWebclient = struct {
 					const upgrade = self.client.request.headers.getFirstValue("upgrade");
 
 					if(upgrade != null and std.mem.eql(u8, upgrade.?, "websocket")) {
-						try ctx.coroutineQueue.append(try Coroutine.create(ctx.allocator, .coroutineWebsocket, .{
+						try ctx.addCoroutine(try Coroutine.create(ctx.allocator, .coroutineWebsocket, .{
 							self.client
 						}));
 						self.dontDeinit = true;

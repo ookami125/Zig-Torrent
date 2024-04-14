@@ -27,40 +27,7 @@ pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !Torrent {
     @memset(bitfieldBytes, 0);
     self.bitfield = TBitfield.init(bitfieldBytes, self.file.info.pieces.len);
 
-    //var requestBitfieldBytes = try allocator.alloc(u8, byteCount);
-    //@memset(requestBitfieldBytes, 0);
-    //self.requestBitfield = TBitfield.init(requestBitfieldBytes, self.file.info.pieces.len);
-
-	const name = std.fs.path.basename(path);
-	const dirname = try std.fmt.allocPrint(allocator, "downloads/{s}", .{name});
-	var outdir = std.fs.cwd().makeOpenPath(dirname, .{}) catch |err| blk: {
-		if(err != std.os.MakeDirError.PathAlreadyExists) return err;
-		break :blk try std.fs.cwd().openDir(dirname, .{});
-	};
-    allocator.free(dirname);
-	
-	self.outfile = try outdir.createFile("file.bin", .{ .read = true });
-	
-	var extractFile = try outdir.createFile("extractor.sh", .{ .read = false });
-	
-	_ = try extractFile.write("#!/bin/bash\n");
-	_ = try extractFile.write("mkdir \"output\"\n");
-	var offset: u64 = 0;
-	for(self.file.info.files) |file| {
-		std.debug.print("filename: {s}\n", .{file.path});
-		try std.fmt.format(extractFile.writer(), "dd if=file.bin of=\"output/{s}\" skip={}B count={}B\n", .{file.path, offset, file.length});
-		offset += file.length;
-	}
-
-    //self.writelist = .{
-    //    .next = null,
-    //    .prev = null,
-    //    .start = 0,
-    //    .end = self.file.info.length,
-    //};
-
 	self.notDownloaded = try RangeArray(usize).init(allocator, self.file.info.pieces.len);
-	//defer notDownloaded.deinit();
 	try self.notDownloaded.add(0, self.getSize());
 	for(0..self.file.info.pieces.len) |i| {
 		try self.notDownloaded.split(i*self.file.info.pieceLength);
@@ -71,8 +38,37 @@ pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !Torrent {
     return self;
 }
 
+pub fn loadRaw(allocator: std.mem.Allocator, filename: []const u8, contents: []const u8) !Torrent {
+    var self: Torrent = undefined;
+
+    self.allocator = allocator;
+    self.file = try TorrentInfo.loadRaw(allocator, filename, contents);
+
+    const byteCount = TBitfield.bytesRequired(self.file.info.pieces.len);
+
+    const bitfieldBytes = try allocator.alloc(u8, byteCount);
+    @memset(bitfieldBytes, 0);
+    self.bitfield = TBitfield.init(bitfieldBytes, self.file.info.pieces.len);
+
+	self.notDownloaded = try RangeArray(usize).init(allocator, self.file.info.pieces.len);
+	try self.notDownloaded.add(0, self.getSize());
+	for(0..self.file.info.pieces.len) |i| {
+		try self.notDownloaded.split(i*self.file.info.pieceLength);
+	}
+
+	self.downloaded = try RangeArray(usize).init(allocator, self.file.info.pieces.len);
+
+	const temp = try allocator.alloc(u8, filename.len + 4);
+	defer allocator.free(temp);
+	std.mem.copyForwards(u8, temp, filename);
+	std.mem.copyForwards(u8, temp[filename.len..], ".bin");
+
+	self.outfile = try std.fs.cwd().createFile(temp, .{ .read = true, .truncate = false });
+    
+	return self;
+}
+
 pub fn deinit(self: *@This()) void {
-    self.outfile.close();
     self.allocator.free(self.bitfield.bytes);
     //self.allocator.free(self.requestBitfield.bytes);
 	self.downloaded.deinit();
@@ -90,4 +86,22 @@ pub fn getDownloaded(self: @This()) u64 {
 		sum += range.length();
 	}
 	return sum;
+}
+
+pub fn writePieceFile(i: u64, data: []const u8) !void {
+	var file_path_raw: [32]u8 = undefined;
+	const file_path = try std.fmt.bufPrint(&file_path_raw, "{}.piece", .{i});
+	const dir = try std.fs.cwd().openDir("downloads/pieces-zig/", .{});
+	const file = try dir.createFile(file_path, .{});
+	try file.writeAll(data);
+}
+
+pub fn pieceCheck(i: u64, data: []const u8, pieceHash: Torrent.Hash) bool {
+	_ = i;
+	var buff: Torrent.Hash = undefined;
+	std.crypto.hash.Sha1.hash(data, &buff, .{});
+
+	const result = std.mem.eql(u8, &pieceHash, &buff);
+
+	return result;
 }
