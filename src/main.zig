@@ -15,8 +15,7 @@ var quit = false;
 pub fn processingLoop() !void {
 	while(!quit) {
 		if(context.coroutineQueue.items.len == 0) break;
-		const _coroutine = context.coroutineQueue.orderedRemove(0);
-		var coroutine: *Coroutine = _coroutine;
+		var coroutine : *Coroutine = context.coroutineQueue.orderedRemove(0);
 		const done = switch(coroutine.coroutine) {
 			inline else => |*ev| ev.process(&context) catch |err| blk: {
 				std.debug.print("ERROR: {}\n", .{err});

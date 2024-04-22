@@ -18,6 +18,7 @@ fn popCountArray(data: []const u8) u64 {
 pub const CoroutinePeerHandler = struct {
 	log: std.fs.File,
 	torrent: *Torrent,
+	prevState: States,
 	state: States,
 	address: std.net.Address,
 	peerID: Torrent.Hash,
@@ -46,6 +47,7 @@ pub const CoroutinePeerHandler = struct {
 	pub fn init(torrent: *Torrent, peerID: Torrent.Hash, address: std.net.Address) !@This() {
 		var self: @This() = undefined;
 		self.state = .Unstarted;
+		self.prevState = .Unstarted;
 		self.torrent = torrent;
 		self.peerID = peerID;
 		self.address = address;
@@ -81,8 +83,16 @@ pub const CoroutinePeerHandler = struct {
 	}
 
 	pub fn deinit(self: *@This(), ctx: *CoroutineContext) void {
-		self.peer.deinit();
+		if(@intFromEnum(self.prevState) >= @intFromEnum(States.Connected)) {
+			ctx.publish(.{
+				.eventPeerDisconnected = .{
+					.peerId = self.peer.remote_id,
+				},
+			});
+		}
 		ctx.unsubscribe(.coroutinePeerHandler, self);
+		
+		self.peer.deinit();
 		for(self.reqs.items) |req| {
 			const start = req.piece_idx * self.torrent.file.info.pieceLength + req.piece_offset;
 			const end = start + req.block_length;
@@ -109,9 +119,19 @@ pub const CoroutinePeerHandler = struct {
 					});
 				}
 			},
+			.eventTorrentRemoved => |data| {
+				if(!std.mem.eql(u8, &self.torrent.file.infoHash, &data.hash)) return;
+				self.setState(.Done);
+			},
 			inline else => {},
 			//else => {},
 		}
+	}
+
+	fn setState(self: *@This(), state: States) void {
+		if(self.state == state) return;
+		self.prevState = self.state;
+		self.state = state;
 	}
 
 	fn processInternal(self: *@This(), ctx: *CoroutineContext) !bool {
@@ -137,11 +157,12 @@ pub const CoroutinePeerHandler = struct {
 
 				ctx.subscribe(EventBitfield.initMany(&[_]EventType{
 					.eventRequestGlobalState,
+					.eventTorrentRemoved,
 				}),
 				.coroutinePeerHandler,
 				self);
 
-				self.state = .WaitForConnection;
+				self.setState(.WaitForConnection);
 			},
 			.WaitForConnection => {
 				const connected = self.peer.pollConnected() catch |err| {
@@ -153,7 +174,7 @@ pub const CoroutinePeerHandler = struct {
 						try std.fmt.format(self.log.writer(),"(peer.handshake) Error: {}\n", .{err});
 						return true;
 					};
-					self.state = .WaitForHandshake;
+					self.setState(.WaitForHandshake);
 				}
 			},
 			.WaitForHandshake => {
@@ -176,7 +197,7 @@ pub const CoroutinePeerHandler = struct {
 							.peerId = self.peer.remote_id,
 						},
 					});
-					self.state = .Connected;
+					self.setState(.Connected);
 					ctx.publish(.{
 						.eventPeerStateChange = .{
 							.peerId = self.peer.remote_id,
@@ -414,7 +435,7 @@ pub const CoroutinePeerHandler = struct {
 					}
 					if(sum == self.torrent.getSize()) {
 						try std.fmt.format(self.log.writer(),"Moving onto Done ({}, {})\n", .{self.reqs.items.len, self.torrent.notDownloaded.ranges.len});
-						self.state = .Done;
+						self.setState(.Done);
 						ctx.publish(.{
 							.eventPeerStateChange = .{
 								.peerId = self.peer.remote_id,
@@ -427,11 +448,10 @@ pub const CoroutinePeerHandler = struct {
 			},
 			.Done => {
 				try std.fmt.format(self.log.writer(),"!Done\n", .{});
-				ctx.publish(.{
-					.eventPeerDisconnected = .{
-						.peerId = self.peer.remote_id,
-					},
-				});
+				var encoder : std.base64.Base64Encoder = std.base64.standard.Encoder;
+				var buf : [30]u8 = undefined;
+				const slice = encoder.encode(&buf, &self.peer.remote_id);
+				try std.fmt.format(self.log.writer(),"ID: \"{s}\"\n", .{ slice });
 				return true;
 			}
 		}
@@ -441,7 +461,7 @@ pub const CoroutinePeerHandler = struct {
 	pub fn process(self: *@This(), ctx: *CoroutineContext) !bool {
 		//std.debug.print("self: {*}\n", .{self});
 		return processInternal(self, ctx) catch {
-			self.state = .Done;
+			self.setState(.Done);
 			return false; 
 		};
 	}

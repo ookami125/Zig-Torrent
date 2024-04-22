@@ -89,6 +89,7 @@ pub const CoroutineTorrentHandler = struct {
 	}
 
 	pub fn deinit(self: *@This(), ctx: *CoroutineContext) void {
+		ctx.unsubscribe(.coroutineTorrentHandler, self);
 		ctx.allocator.free(self.filename);
 		ctx.allocator.free(self.contents);
 	}
@@ -235,6 +236,12 @@ pub const CoroutineTorrentHandler = struct {
 				const start: u64 = block.pieceIdx * self.torrent.file.info.pieceLength;
 				self.readFromFiles(ctx.allocator, start, block.data) catch {};
 			},
+			.eventRequestRemoveTorrent => |block| {
+				if(!std.mem.eql(u8, &block.hash, &self.torrent.file.infoHash)) {
+					return;
+				}
+				self.state = .Done;
+			},
 			else => {},
 		}
 	}
@@ -266,6 +273,7 @@ pub const CoroutineTorrentHandler = struct {
 					.eventRequestGlobalState,
 					.eventBlockReceived,
 					.eventRequestReadBlock,
+					.eventRequestRemoveTorrent,
 				}),
 				.coroutineTorrentHandler,
 				self);
@@ -356,6 +364,11 @@ pub const CoroutineTorrentHandler = struct {
 				//TODO: Idles here and never gets removed, there should be conditions or events to handle this.
 			},
 			.Done => {
+				const idx : usize = std.mem.indexOfScalar(*Torrent, ctx.torrents.items, self.torrent) orelse { return true; };
+				_ = ctx.torrents.orderedRemove(idx);
+				ctx.publish(.{ .eventTorrentRemoved = .{
+					.hash = self.torrent.file.infoHash,
+				}});
 				return true;
 			}
 		}

@@ -45,6 +45,8 @@ pub const EventType = enum {
 	eventPeerHave,
 	eventBlockReceived,
 	eventRequestReadBlock,
+	eventRequestRemoveTorrent,
+	eventTorrentRemoved,
 };
 
 pub const EventData = union(EventType) {
@@ -81,6 +83,12 @@ pub const EventData = union(EventType) {
 		blockOffset: u64,
 		data: []u8,
 		failed: *bool,
+	},
+	eventRequestRemoveTorrent: struct {
+		hash: [20]u8,
+	},
+	eventTorrentRemoved: struct {
+		hash: [20]u8,
 	}
 };
 

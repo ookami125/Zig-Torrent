@@ -58,10 +58,9 @@ pub fn loadRaw(allocator: std.mem.Allocator, filename: []const u8, contents: []c
 
 	self.downloaded = try RangeArray(usize).init(allocator, self.file.info.pieces.len);
 
-	const temp = try allocator.alloc(u8, filename.len + 4);
+	const temp = try allocator.alloc(u8, filename.len);
 	defer allocator.free(temp);
 	std.mem.copyForwards(u8, temp, filename);
-	std.mem.copyForwards(u8, temp[filename.len..], ".bin");
 
 	self.outfile = try std.fs.cwd().createFile(temp, .{ .read = true, .truncate = false });
     

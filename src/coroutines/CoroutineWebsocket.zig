@@ -7,6 +7,7 @@ const WebSocket = WS.WebSocket;
 const Bencode = @import("../bencode.zig");
 const EventBitfield = Coroutine.EventBitfield;
 const EventType = Coroutine.EventType;
+const Hash = @import("../torrent.zig").Hash;
 
 const MsgFilename = struct {
 	filename: []const u8,
@@ -17,14 +18,18 @@ fn on_msg(msg: []const u8, ws: *WebSocket) void {
 	_ = ws;
 }
 
-const Packet = struct {
-	packetType: u32,
-	packetData: []const u8,
+const PacketData = union {
+	Raw: []const u8,
+	UploadedFile: struct {
+		filename: []const u8,
+		contents: []const u8,
+	},
+	RemoveTorrent: Hash,
 };
 
-const UploadedFile = struct {
-	filename: []const u8,
-	contents: []const u8,
+const Packet = struct {
+	packetType: u32,
+	packetData: PacketData,
 };
 
 fn on_binary(msg: []const u8, ws: *WebSocket) void {
@@ -36,29 +41,48 @@ fn on_binary(msg: []const u8, ws: *WebSocket) void {
 			continue;
 		}
 		if(std.mem.eql(u8, pair.key, "packetData")) {
-			packet.packetData = pair.value;
+			packet.packetData = .{ .Raw = pair.value };
 			continue;
 		}
 	}
 	handlePacket(&packet, ws) catch return;
 }
 
+const PacketID = enum(u32) {
+	UploadFile = 5,
+	RemoveTorrent = 6,
+};
+
 fn handlePacket(packet: *Packet, ws: *WebSocket) !void {
 	const websocket = @fieldParentPtr(CoroutineWebsocket, "ws", ws);
-	const allocator = websocket.uploaded_files.allocator;
+	const allocator = websocket.packets.allocator;
 	switch(packet.packetType) {
 		5 => {
-			var file: UploadedFile = undefined;
-			var packetData = try Bencode.GetDict(packet.packetData, null);
+			var file: PacketData = .{ .UploadedFile = undefined, };
+			var packetData = try Bencode.GetDict(packet.packetData.Raw, null);
 			while(packetData.next()) |pair| {
 				if(std.mem.eql(u8, pair.key, "filename")) {
-					file.filename = try allocator.dupe(u8, try Bencode.GetString(pair.value, null));
+					file.UploadedFile.filename = try allocator.dupe(u8, try Bencode.GetString(pair.value, null));
 				}
 				if(std.mem.eql(u8, pair.key, "contents")) {
-					file.contents = try allocator.dupe(u8, try Bencode.GetString(pair.value, null));
+					file.UploadedFile.contents = try allocator.dupe(u8, try Bencode.GetString(pair.value, null));
 				}
 			}
-			try websocket.uploaded_files.append(file);
+			packet.packetData = file;
+			try websocket.packets.append(packet.*);
+		},
+		6 => {
+			var hash: Hash = undefined;
+			var packetData = try Bencode.GetDict(packet.packetData.Raw, null);
+			while(packetData.next()) |pair| {
+				if(std.mem.eql(u8, pair.key, "hash")) {
+					const tempHash = try Bencode.GetString(pair.value, null);
+					if(tempHash.len != 20) return error.HashIsWrongLength;
+					std.mem.copyForwards(u8, &hash, tempHash);
+				}
+			}
+			packet.packetData = .{ .RemoveTorrent = hash, };
+			try websocket.packets.append(packet.*);
 		},
 		else => {},
 	}
@@ -68,7 +92,7 @@ pub const CoroutineWebsocket = struct {
 	state: States,
 	response: std.http.Server.Response,
 	ws: WebSocket,
-	uploaded_files: std.ArrayList(UploadedFile),
+	packets: std.ArrayList(Packet),
 
 	const States = enum {
 		Unstarted,
@@ -110,20 +134,21 @@ pub const CoroutineWebsocket = struct {
 
 	pub fn process(self: *@This(), ctx: *CoroutineContext) !bool {
 		const ws_events = WS.WsEvents{
-			.on_msg = on_msg,
+			.on_msg = on_binary,
 			.on_binary = on_binary,
 		};
 		switch(self.state) {
 			.Unstarted => {
 				std.debug.print("Socket Connected!\n", .{});
 				// will take the ownership of the response
-				self.uploaded_files = @TypeOf(self.uploaded_files).init(ctx.allocator);
+				self.packets = @TypeOf(self.packets).init(ctx.allocator);
 				self.ws = try WebSocket.init(ctx.allocator, &self.response);
 				try self.ws.handleOnceInit(ws_events);
 				self.state = .Active;
 
 				ctx.subscribe(EventBitfield.initMany(&[_]EventType{
 					.eventTorrentAdded,
+					.eventTorrentRemoved,
 					.eventPeerConnected,
 					.eventPeerHave,
 					.eventPeerStateChange,
@@ -139,15 +164,29 @@ pub const CoroutineWebsocket = struct {
 					if(!try self.ws.handleOnce(ws_events)) {
 						std.debug.print("Socket Closed!\n", .{});
 						self.state = .Done;
+						break;
 					}
 				}
-				if(self.uploaded_files.items.len > 0) {
-					const file = self.uploaded_files.orderedRemove(0);
-					try ctx.addCoroutine(try Coroutine.create(ctx.allocator, .coroutineTorrentHandler, .{
-						file.filename,
-						file.contents
-					}));
+				for(self.packets.items) |packet| {
+					switch(@as(PacketID, @enumFromInt(packet.packetType))) {
+						PacketID.UploadFile => {
+							const file = packet.packetData.UploadedFile;
+							try ctx.addCoroutine(try Coroutine.create(ctx.allocator, .coroutineTorrentHandler, .{
+								file.filename,
+								file.contents
+							}));
+						},
+						PacketID.RemoveTorrent => {
+							std.debug.print("Remove torrent!\n", .{});
+							ctx.publish(.{
+								.eventRequestRemoveTorrent = .{
+									.hash = packet.packetData.RemoveTorrent,
+								},
+							});
+						}
+					}
 				}
+				self.packets.clearRetainingCapacity();
 			},
 			.Done => {
 				std.debug.print("Done!\n", .{});

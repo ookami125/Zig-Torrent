@@ -46,13 +46,22 @@ function concat(arrays) {
 	return result;
 }
 
+function hexToBytes(hex) {
+    let bytes = [];
+    for (let c = 0; c < hex.length; c += 2)
+        bytes.push(parseInt(hex.substr(c, 2), 16));
+    return bytes;
+}
+
 function setup() {
-    incomingSpan = document.getElementById('incoming');
-    outgoingText = document.getElementById('outgoing');
-    connectionSpan = document.getElementById('connection');
-    connectButton = document.getElementById('connectButton');
+	incomingSpan = document.getElementById('incoming');
+	outgoingText = document.getElementById('outgoing');
+	connectionSpan = document.getElementById('connection');
+	connectButton = document.getElementById('connectButton');
 	uploadButton = document.getElementById('uploadButton');
 	uploadFile = document.getElementById('uploadFile');
+	torrentID = document.getElementById('torrentId');
+	removeButton = document.getElementById('removeButton');
 
 	uploadButton.onclick = async function() {
 		let file = uploadFile.files[0];
@@ -69,6 +78,21 @@ function setup() {
 		]);
 		socket.send(msg);
 		uploadFile.value = null;
+	}
+
+	removeButton.onclick = async function() {
+		let id = hexToBytes(torrentID.value);
+		//let byteFile = await getAsByteArray(file);
+		//socket.send("{\"filename\":\""+file.name+"\"}");
+		let msg = concat([
+			"d",
+			"10:packetTypei"+REQUEST_REMOVE_TORRENT+"e",
+			"10:packetDatad",
+			"4:hash" + id.length + ":", id,
+			"ee"
+		]);
+		socket.send(msg);
+		torrentID.value = null;
 	}
 
     outgoingText.addEventListener('change', sendMessage);
@@ -123,6 +147,8 @@ const PEER_DISCONNECTED = 2;
 const PEER_STATE_CHANGED = 3;
 const PEER_HAVE = 4;
 const FILE_UPLOAD = 5;
+const REQUEST_REMOVE_TORRENT = 6;
+const TORRENT_REMOVED = 9;
 
 function bitCount (n) {
 	n = n - ((n >> 1) & 0x55555555)
@@ -155,6 +181,9 @@ function readIncomingMessage(event_raw) {
 		} break;
 		case PEER_HAVE: {
 			addPeer(ev.data);
+		} break;
+		case TORRENT_REMOVED: {
+			removeTorrent(ev.data);
 		} break;
 		//case PEER_UPDATED: {
 		//	var piece_count = bitCountArray(ev.peer.remote_pieces);
@@ -198,8 +227,10 @@ myLayout.registerComponent('debugPanel', function (container, state) {
 		"<input type=\"button\" id=\"connectButton\" value=\"Connect\"><br>" +
 		"Outgoing message: <input type=\"text\" id=\"outgoing\"><br>" +
 		"Incoming message: <ul id=\"incoming\"></ul><br>" +
-		"<input type=\"file\" id=\"uploadFile\" name=\"file\" /><br><br>" +
-		"<button id=\"uploadButton\">Upload</button>"
+		"<input type=\"file\" id=\"uploadFile\" name=\"file\" /><br>" +
+		"<button id=\"uploadButton\">Upload</button><br><br>" +
+		"<input type=\"text\" id=\"torrentId\" name=\"torrentID\" /><br>" +
+		"<button id=\"removeButton\">Remove</button>"
 	);
 });
 
@@ -238,9 +269,14 @@ var addTorrent = function (data) {
 	$('#root')[0].innerText = JSON.stringify(root, null, 2);
 };
 
+var removeTorrent = function (data) {
+	data.hash = toHexString(data.hash);
+	delete root.torrents[data.hash];
+	$('#root')[0].innerText = JSON.stringify(root, null, 2);
+};
+
 var addPeer = function (data) {
-	if(!(typeof data.peerId === 'string' || data.peerId instanceof String))
-	{
+	if(!(typeof data.peerId === 'string' || data.peerId instanceof String)) {
 		data.peerId = "b64@" + bytesArrToBase64(data.peerId);
 	}
 	root.peers[data.peerId] = data;
@@ -248,6 +284,9 @@ var addPeer = function (data) {
 };
 
 var removePeer = function (data) {
+	if(!(typeof data.peerId === 'string' || data.peerId instanceof String)) {
+		data.peerId = "b64@" + bytesArrToBase64(data.peerId);
+	}
 	delete root.peers[data.peerId]
 	$('#root')[0].innerText = JSON.stringify(root, null, 2);
 };
