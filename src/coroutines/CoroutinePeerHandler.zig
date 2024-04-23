@@ -108,9 +108,9 @@ pub const CoroutinePeerHandler = struct {
 
 	pub fn message(self: *@This(), ctx: *CoroutineContext, eventData: Coroutine.EventData) void {
 		switch (eventData) {
-			.eventRequestGlobalState => {
+			.eventRequestGlobalState => |data| {
 				if(self.peer.processed_handshake) {
-					ctx.publish(.{
+					ctx.publishDirect(data.requester, .{
 						.eventPeerStateChange = .{
 							.peerId = self.peer.remote_id,
 							.state = @intFromEnum(self.state),

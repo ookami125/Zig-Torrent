@@ -213,8 +213,8 @@ pub const CoroutineTorrentHandler = struct {
 
 	pub fn message(self: *@This(), ctx: *CoroutineContext, eventData: Coroutine.EventData) void {
 		switch (eventData) {
-			.eventRequestGlobalState => {
-				ctx.publish(.{
+			.eventRequestGlobalState => |data| {
+				ctx.publishDirect(data.requester, .{
 					.eventTorrentAdded = .{
 						.hash = self.torrent.file.infoHash,
 						.pieces = self.torrent.file.info.pieces.len,

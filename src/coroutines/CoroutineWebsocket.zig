@@ -127,8 +127,7 @@ pub const CoroutineWebsocket = struct {
 		_ = ctx;
 		switch (eventData) {
 			inline else => |data| self.send(@intFromEnum(eventData), data) catch {},
-			//.eventPeerUpdated => |data| self.updatePeer(ctx.allocator, data.*),
-			//else => {},
+			.eventRequestGlobalState => {}, // This can not be stringified due to the pointer
 		}
 	}
 
@@ -157,7 +156,9 @@ pub const CoroutineWebsocket = struct {
 				.coroutineWebsocket,
 				self);
 
-				ctx.publish(.{ .eventRequestGlobalState = undefined });
+				ctx.publish(.{ .eventRequestGlobalState = .{
+					.requester = Coroutine.getParentCoroutine(.coroutineWebsocket, self),
+				}});
 			},
 			.Active => {
 				while(try NetUtils.bytesAvailable(self.ws.stream.handle)) {

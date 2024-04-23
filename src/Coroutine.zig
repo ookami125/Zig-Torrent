@@ -61,7 +61,9 @@ pub const EventData = union(EventType) {
 	eventPeerDisconnected: struct {
 		peerId: [20]u8,
 	},
-	eventRequestGlobalState: struct {},
+	eventRequestGlobalState: struct {
+		requester: *Coroutine,
+	},
 	eventPeerStateChange: struct {
 		peerId: [20]u8,
 		state: u32,
@@ -91,6 +93,12 @@ pub const EventData = union(EventType) {
 		hash: [20]u8,
 	}
 };
+
+pub fn getParentCoroutine(comptime coroutineType: CoroutineType, coroutine: anytype) *Coroutine {
+	const parent = @fieldParentPtr(Coroutine.CoroutineData, @tagName(coroutineType), coroutine);
+	const parentParent = @fieldParentPtr(Coroutine, "coroutine", parent);
+	return parentParent;
+}
 
 pub const EventBitfield = std.EnumSet(EventType);
 
@@ -136,24 +144,15 @@ pub const CoroutineContext = struct {
 	}
 
 	pub fn subscribe(self: *@This(), bitfield: EventBitfield, comptime coroutineType: CoroutineType, coroutine: anytype) void {
-		//std.debug.print("coroutine(self): {*}\n", .{coroutine});
-		//const typed = @TypeOf(coroutine);
-		//std.debug.print("Type: {}\n", .{typed});
-		const parent = @fieldParentPtr(Coroutine.CoroutineData, @tagName(coroutineType), coroutine);
-		//std.debug.print("parent: {*}\n", .{parent});
-		const parentParent = @fieldParentPtr(Coroutine, "coroutine", parent);
-		//std.debug.print("parentParent: {*}\n", .{parentParent});
-		//std.debug.print("parentParent.eventBitfield: {*}\n", .{&(parentParent.eventBitfield)});
-		//std.debug.print("parentParent.coroutine: {*}\n", .{&(parentParent.coroutine)});
-		parentParent.eventBitfield = bitfield;
-		self.subscriberQueue.append(parentParent) catch {};
+		const parent = getParentCoroutine(coroutineType, coroutine);
+		parent.eventBitfield = bitfield;
+		self.subscriberQueue.append(parent) catch {};
 	}
 
 	pub fn unsubscribe(self: *@This(), comptime coroutineType: CoroutineType, coroutine: anytype) void {
-		const parent = @fieldParentPtr(Coroutine.CoroutineData, @tagName(coroutineType), coroutine);
-		const parentParent = @fieldParentPtr(Coroutine, "coroutine", parent);
+		const parent = getParentCoroutine(coroutineType, coroutine);
 		for(self.subscriberQueue.items, 0..) |item, i| {
-			if(parentParent == item) {
+			if(parent == item) {
 				_ = self.subscriberQueue.orderedRemove(i);
 				break;
 			}
@@ -164,12 +163,16 @@ pub const CoroutineContext = struct {
 		const eventType: EventType = eventData;
 		for(self.subscriberQueue.items) |item| {
 			if(item.*.eventBitfield.contains(eventType) == true) {
-				switch(item.coroutine) {
-					inline else => |*item2| {
-						if(@hasDecl(@TypeOf(item2.*), "message")) {
-							item2.message(self, eventData);
-						}
-					}
+				self.publishDirect(item, eventData);
+			}
+		}
+	}
+
+	pub fn publishDirect(self: *@This(), item: *Coroutine, eventData: EventData) void {
+		switch(item.coroutine) {
+			inline else => |*item2| {
+				if(@hasDecl(@TypeOf(item2.*), "message")) {
+					item2.message(self, eventData);
 				}
 			}
 		}
