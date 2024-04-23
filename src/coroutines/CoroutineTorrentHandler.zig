@@ -70,6 +70,7 @@ pub const CoroutineTorrentHandler = struct {
 	files: []MappedFile,
 	state: States,
 	pieceCheckOffset: u64,
+	lastBitfieldCount: u64,
 
 	const States = enum {
 		Unloaded,
@@ -141,8 +142,6 @@ pub const CoroutineTorrentHandler = struct {
 		}
 	}
 
-	//FIXME: This code is broken somehow, verified via downloading using an external
-	// client and having this run a piece check afterwards.
 	fn writeToFiles(self: *@This(), allocator: std.mem.Allocator, _byteOffset: u64, _data: []const u8) !void {
 		var byteOffset = _byteOffset;
 		var data = _data;
@@ -361,7 +360,18 @@ pub const CoroutineTorrentHandler = struct {
 				self.state = .Loaded;
 			},
 			.Loaded => {
-				//TODO: Idles here and never gets removed, there should be conditions or events to handle this.
+				//TODO: Optimize this, bitfield count should need to be computed every loop
+				const bitfieldCount = completed(self.torrent.bitfield);
+				if(bitfieldCount > self.lastBitfieldCount) {
+					self.lastBitfieldCount = bitfieldCount;
+					ctx.publish(.{
+						.eventTorrentAdded = .{
+							.hash = self.torrent.file.infoHash,
+							.pieces = self.torrent.file.info.pieces.len,
+							.completed = bitfieldCount,
+						}
+					});
+				}
 			},
 			.Done => {
 				const idx : usize = std.mem.indexOfScalar(*Torrent, ctx.torrents.items, self.torrent) orelse { return true; };
