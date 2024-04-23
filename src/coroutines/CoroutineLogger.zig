@@ -5,20 +5,11 @@ const CoroutineContext = Coroutine.CoroutineContext;
 pub const CoroutineLogger = struct {
 	start: i64,
 	timer: u64,
-	prng: std.rand.DefaultPrng,
-	rand: std.rand.Random,
 	
 	pub fn init() !@This() {
 		var self: @This() = undefined;
 		self.start = std.time.milliTimestamp();
 		self.timer = 0;
-		self.prng = std.rand.DefaultPrng.init(blk: {
-			const longSeed: u128 = @intCast(std.time.nanoTimestamp());
-			var seed: u64 = @as(u64, @intCast(longSeed >> 64)) | @as(u64, @intCast(longSeed & 0xFFFFFFFFFFFFFFFF));
-			try std.os.getrandom(std.mem.asBytes(&seed));
-			seed +%= 0xEF01B5F5D99A716E;
-			break :blk seed;
-		});
 		return self;
 	}
 
@@ -30,8 +21,6 @@ pub const CoroutineLogger = struct {
 	pub fn process(self: *@This(), ctx: *CoroutineContext) !bool {
 		
 		if(self.timer < std.time.milliTimestamp()) {
-			std.debug.print("RANDOM: {}\n", .{self.prng.random().intRangeLessThan(u32, 1, 1444)});
-
 			const timestamp: u64 = @intCast(std.time.milliTimestamp() - self.start);
 			const hours = @divTrunc(timestamp % std.time.ms_per_day, std.time.ms_per_hour);
 			const mins = @divTrunc(timestamp % std.time.ms_per_hour, std.time.ms_per_min);

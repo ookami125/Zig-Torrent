@@ -406,11 +406,6 @@ pub const CoroutinePeerHandler = struct {
 					defer ctx.allocator.free(block_temp);
 					for(self.peer.requested_blocks.items) |block| {
 						block_temp = try ctx.allocator.realloc(block_temp, block.piece_length);
-						try self.torrent.outfile.seekTo(block.piece_idx * self.torrent.file.info.pieceLength + block.piece_offset);
-						//const len = try self.torrent.outfile.read(block_temp);
-						//if(len < self.torrent.file.info.pieceLength) {
-						//	continue;
-						//}
 						var failed: bool = false;
 						ctx.publish(.{
 							.eventRequestReadBlock = .{

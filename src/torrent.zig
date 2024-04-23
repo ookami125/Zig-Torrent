@@ -10,8 +10,6 @@ pub const Hash = TorrentInfo.Hash;
 allocator: std.mem.Allocator,
 file: TorrentInfo,
 bitfield: TBitfield,
-//requestBitfield: TBitfield,
-outfile: std.fs.File,
 notDownloaded: RangeArray(usize),
 downloaded: RangeArray(usize),
 
@@ -58,12 +56,6 @@ pub fn loadRaw(allocator: std.mem.Allocator, filename: []const u8, contents: []c
 
 	self.downloaded = try RangeArray(usize).init(allocator, self.file.info.pieces.len);
 
-	const temp = try allocator.alloc(u8, filename.len);
-	defer allocator.free(temp);
-	std.mem.copyForwards(u8, temp, filename);
-
-	self.outfile = try std.fs.cwd().createFile(temp, .{ .read = true, .truncate = false });
-    
 	return self;
 }
 
