@@ -125,7 +125,7 @@ pub const CoroutineTorrentHandler = struct {
 		return left - 1;
 	}
 
-	fn getFile(self: @This(), allocator: std.mem.Allocator, i: usize) !void
+	fn getFile(self: @This(), allocator: std.mem.Allocator, i: usize, create: bool) !bool
 	{
 		if(self.files[i].contents == null) {
 			const file = self.torrent.file.info.files[i];
@@ -135,20 +135,23 @@ pub const CoroutineTorrentHandler = struct {
 			defer allocator.free(fullPath);
 			const cwd = std.fs.cwd();
 			var dir = cwd.openDir(file.path, .{}) catch blk: {
+				if(!create) return false;
 				break :blk try cwd.makeOpenPath(file.path, .{});
 			};
+			if(!create and blk: { dir.access(file.name, .{}) catch break :blk true; break :blk false; }) return false;
 			dir.close();
 			try self.files[i].mapFile(fullPath, null, file.length);
 		}
+		return false;
 	}
 
 	fn writeToFiles(self: *@This(), allocator: std.mem.Allocator, _byteOffset: u64, _data: []const u8) !void {
 		var byteOffset = _byteOffset;
 		var data = _data;
 
-		const data2 = try allocator.alloc(u8, _data.len);
-		defer allocator.free(data2);
-		try self.readFromFiles(allocator, _byteOffset, data2);
+		//const data2 = try allocator.alloc(u8, _data.len);
+		//defer allocator.free(data2);
+		//_ = try self.readFromFiles(allocator, _byteOffset, data2);
 
 		const fileIdx : usize = search(self.files, 0, self.files.len, byteOffset);
 		std.debug.assert(self.files[fileIdx].location <= byteOffset);
@@ -158,7 +161,7 @@ pub const CoroutineTorrentHandler = struct {
 		for(self.torrent.file.info.files[fileIdx..], fileIdx..) |file, i| {
 			const write_length = @min(file.length - byteOffset, data.len);
 			
-			try self.getFile(allocator, i);
+			_ = try self.getFile(allocator, i, true);
 			std.mem.copyForwards(u8, 
 				self.files[i].contents.?[byteOffset..(byteOffset+write_length)],
 				data[0..write_length],
@@ -171,7 +174,7 @@ pub const CoroutineTorrentHandler = struct {
 		}
 	}
 
-	fn readFromFiles(self: *@This(), allocator: std.mem.Allocator, _byteOffset: u64, _data: []u8) !void {
+	fn readFromFiles(self: *@This(), allocator: std.mem.Allocator, _byteOffset: u64, _data: []u8) !bool {
 		var byteOffset = _byteOffset;
 		var data = _data;
 
@@ -183,7 +186,7 @@ pub const CoroutineTorrentHandler = struct {
 		for(self.torrent.file.info.files[fileIdx..], fileIdx..) |file, i| {
 			const write_length = @min(file.length - byteOffset, data.len);
 			
-			try self.getFile(allocator, i);
+			if(!try self.getFile(allocator, i, false)) return false;
 			const destSlice = data[0..write_length];
 			const srcSlice = self.files[i].contents.?[byteOffset..(byteOffset+write_length)];
 			std.mem.copyForwards(u8, 
@@ -194,8 +197,10 @@ pub const CoroutineTorrentHandler = struct {
 				data = data[write_length..];
 				byteOffset = 0;
 			}
-			else break;
+			else return true;
 		}
+
+		return false;
 	}
 
 	fn popCountArray(data: []const u8) u64 {
@@ -233,7 +238,7 @@ pub const CoroutineTorrentHandler = struct {
 					return;
 				}
 				const start: u64 = block.pieceIdx * self.torrent.file.info.pieceLength;
-				self.readFromFiles(ctx.allocator, start, block.data) catch {};
+				block.failed.* = !blk: {break :blk self.readFromFiles(ctx.allocator, start, block.data) catch break :blk false; };
 			},
 			.eventRequestRemoveTorrent => |block| {
 				if(!std.mem.eql(u8, &block.hash, &self.torrent.file.infoHash)) {
@@ -307,11 +312,16 @@ pub const CoroutineTorrentHandler = struct {
 					//	std.debug.print("PIECE NOT OF CORRECT LENGTH! {}\n", .{i});
 					//	continue;
 					//}
-					self.readFromFiles(ctx.allocator, start, temp2[0..(end-start)]) catch |err| {
+					const read = self.readFromFiles(ctx.allocator, start, temp2[0..(end-start)]) catch |err| {
 						std.debug.print("ERROR: {}\n", .{err});
 						std.debug.print("FAILED TO READ PIECE FROM FILES! {}\n", .{i});
 						continue;
 					};
+
+					//If file doesn't exist read returns false
+					if(!read) {
+						continue;
+					}
 					//if(!std.mem.eql(u8, temp[0..len], temp2[0..len])) {
 					//	std.debug.print("SINGLE AND MULTIFILE CONTENTS NOT EQUAL! {}\n", .{i});
 					//	writePieceFile("downloads/zig-piece-fails/", i, temp2) catch {};
